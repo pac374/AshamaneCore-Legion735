@@ -1031,6 +1031,20 @@ class TC_GAME_API WorldSession
         uint8 GetExpansion() const { return m_expansion; }
         std::string const& GetOS() const { return _os; }
 
+        // Playerbots-Modul, Runde F (27.09.2026, siehe BotMgr.h/BotMgr.cpp und
+        // Bericht lcf2r68_2026-09-27_playerbots_rundef.md): rein additiver
+        // Marker, den ausschliesslich BotMgr (bereits "friend class BotMgr;"
+        // oben) fuer seine socketlosen Bot-Sessions setzt. Keine bestehende
+        // Verhaltenslogik liest dieses Flag bisher, ausser den in Runde F neu
+        // eingefuegten, bot-only Diagnose-Log-Zeilen in
+        // WorldSession::HandlePlayerLogin() (CharacterHandler.cpp) - dient
+        // dazu, beim naechsten Live-Testversuch (Runde G) exakt zu sehen, an
+        // welcher Codezeile der worldserver-Absturz aus Runde E auftritt, ohne
+        // dafuer WinDbg/PDB zu benoetigen (beides in Runde F nicht verfuegbar,
+        // siehe Bericht). Default false fuer jede normale Spieler-Session.
+        bool IsBotSession() const { return _isBotSession; }
+        void SetBotSession(bool isBotSession) { _isBotSession = isBotSession; }
+
         void InitWarden(BigNumber* k);
 
         /// Session in auth.queue currently
@@ -1906,6 +1920,15 @@ class TC_GAME_API WorldSession
         AsyncCallbackProcessor<SQLQueryHolderCallback> _queryHolderProcessor;
 
     friend class World;
+    // Playerbots-Modul, Runde B (27.09.2026, siehe BotMgr.h Kopfkommentar
+    // "Runde B"): BotMgr treibt socketlose Bot-WorldSessions manuell per
+    // ProcessQueryCallbacks() (statt Update(), das bei socket=nullptr
+    // abstuerzt, siehe Runde-A-Befund oben) und liest _legitCharacters direkt,
+    // weil IsLegitCharacterForAccount() sonst fuer einen Bot ohne echten
+    // CharEnum-Netzwerkroundtrip nie true liefert. Bewusst minimale,
+    // rein additive Sichtbarkeits-Freigabe (kein ABI-/Vtable-Eingriff, keine
+    // Verhaltensaenderung fuer reguläre Sessions) - Details im BotMgr.h-Kommentar.
+    friend class BotMgr;
     protected:
         class DosProtection
         {
@@ -1968,6 +1991,9 @@ class TC_GAME_API WorldSession
         uint8 m_accountExpansion;
         uint8 m_expansion;
         std::string _os;
+
+        // Playerbots-Modul, Runde F - siehe Kommentar bei IsBotSession() oben.
+        bool _isBotSession = false;
 
         std::array<uint8, 32> _realmListSecret;
         std::unordered_map<uint32 /*realmAddress*/, uint8> _realmCharacterCounts;

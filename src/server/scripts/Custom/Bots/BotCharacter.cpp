@@ -15,23 +15,11 @@
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
-// This is where scripts' loading functions should be declared:
-void AddSC_custom_npcs();
-void AddSC_module_dkskip();
-void AddSC_bot_playerscript_hooks();
-void AddSC_bot_commandscript();
+// Bewusst leer: IBotCharacter ist in dieser Runde ein reines Interface ohne
+// konkrete Implementierung. Eine BotCharacter-Klasse, die es implementiert,
+// folgt erst zusammen mit dem Session-Faking-Kernstueck (eigene, fokussierte
+// Runde). Diese Datei existiert nur, damit die geplante Quelldatei-Struktur
+// bereits vorhanden ist (Header ohne .cpp waere fuer dieses Projektmuster
+// unueblich) und damit spaetere Diffs klein/lesbar bleiben.
 
-// ADM declaration begin
-// ADM declaration end
-
-// The name of this function should match:
-// void Add${NameOfDirectory}Scripts()
-void AddCustomScripts()
-{
-    AddSC_custom_npcs();
-    AddSC_module_dkskip();
-    AddSC_bot_playerscript_hooks();
-    AddSC_bot_commandscript();
-    // ADM call begin
-    // ADM call end
-}
+#include "BotCharacter.h"
