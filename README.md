@@ -1,5 +1,7 @@
 # AshamaneCore
 
+**English version:** [README.en.md](README.en.md)
+
 Ein privater [TrinityCore](https://www.trinitycore.org/)-Fork fuer **World of Warcraft: Legion (7.3.5, Build 26972)**.
 
 Dieses Repository enthaelt den **C++-Quellcode**: eigene GM-Commands, SmartAI-Erweiterungen, Core-Erweiterungen
