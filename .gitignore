@@ -1,0 +1,63 @@
+
+build*/
+.directory
+.mailmap
+*.orig
+*.rej
+*~
+.hg/
+*.kdev*
+.DS_Store
+CMakeLists.txt.user
+*.bak
+*.patch
+*.diff
+*.REMOTE.*
+*.BACKUP.*
+*.BASE.*
+*.LOCAL.*
+nbproject/*
+.idea/*
+.browse.VC*
+.vscode
+cmake-build-*/
+.vs
+
+###################################################################################################
+# AshamaneCore (privater Fork) - private Daten, NICHT oeffentlich
+#
+# Grund: diese SQL-Daten (Koordinaten, Kreatur-/Objekt-Spawns, Quest-Credits) stammen teilweise aus
+# der Auswertung des LegionCore-7.3.5-Leaks. Das Recherchieren in dieser Quelle ist fuer den privaten
+# Server erlaubt, das oeffentliche Weitergeben der daraus abgeleiteten Rohdaten waere aber ein eigenes
+# rechtliches Risiko (Blizzard-Copyright an Spieldaten), unabhaengig davon ob im SQL-Kommentar auf die
+# Quelle verwiesen wird oder nicht. Der eigene C++-Code (Commands, SmartAI-Erweiterungen, Bugfixes)
+# bleibt oeffentlich - das ist eigene Arbeit auf TrinityCore-Basis (GPL-2.0).
+###################################################################################################
+sql/ashamane/world/*
+!sql/ashamane/world/.gitkeep
+fixes/*.sql
+fixes/**/*.sql
+trait_candidates/*.sql
+trait_candidates/**/*.sql
+
+# Datenbank-Dumps/Backups, egal wo sie im Repo landen
+*.sql.gz
+*.mysqldump
+backups/
+dumps/
+
+# heruntergeladene Fremd-Repos/Client-Datensaetze (falls je unter diesem Ordner statt C:\LegionServer)
+downloads/forks/
+downloads/
+
+# Server-Konfiguration mit echten Zugangsdaten (die .dist-Vorlagen OHNE echte Passwoerter bleiben oeffentlich)
+src/server/worldserver/worldserver.conf
+src/server/bnetserver/bnetserver.conf
+*.conf
+!*.conf.dist
+
+# Sonstige Zugangsdaten/Geheimnisse
+*.pem
+*.key
+.env
+.env.*
