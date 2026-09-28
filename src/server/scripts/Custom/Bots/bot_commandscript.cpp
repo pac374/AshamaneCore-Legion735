@@ -35,6 +35,7 @@ EndScriptData */
 #include "RBAC.h"
 #include "ObjectAccessor.h"
 #include "WorldSession.h"
+#include "LFGMgr.h"
 #include <sstream>
 
 class bot_commandscript : public CommandScript
@@ -68,6 +69,7 @@ public:
             { "followstop",    rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestFollowStop,    "" },
             { "equipartifact", rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestEquipArtifact, "" },
             { "skillartifact", rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestSkillArtifact, "" },
+            { "lfgfill",       rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestLfgFill,       "" },
             { "status",        rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestStatus,        "" },
         };
         static std::vector<ChatCommand> commandTable =
@@ -832,6 +834,22 @@ public:
         return true;
     }
 
+    // .bottest lfgfill
+    // Gruppe Stufe 2, Teil A: manueller Einzelschritt-Test (unabhaengig vom automatischen ~10s-Timer
+    // in BotMgr::ProcessLfgPoolFillTick(), siehe BotMgr.h-Kopfkommentar) - stoesst GENAU EINEN
+    // Nachfuell-Versuch ueber alle aktiven LFG-Queues beider Fraktionen an. Nuetzlich, um ohne
+    // Wartezeit zu pruefen, ob ein wartender echter Spieler-Kandidat korrekt erkannt und ein
+    // passender Bot per LFGMgr::JoinLfg() eingereiht wird - siehe BotMgr::TriggerLfgPoolFillOnce()
+    // fuer den vollen Code-Review und Server.log (scripts.bots) fuer die Diagnose-Zeilen je Versuch.
+    static bool HandleBotTestLfgFill(ChatHandler* handler, char const* /*args*/)
+    {
+        bool filled = sBotMgr->TriggerLfgPoolFillOnce();
+        handler->PSendSysMessage("[bottest] lfgfill: %s - Server.log (scripts.bots) auf "
+            "'BotMgr::TriggerLfgPoolFillOnce' Diagnose-Zeilen pruefen (Kandidat/Rolle/Dungeon-Auswahl).",
+            filled ? "EIN Bot wurde eingereiht" : "kein Nachfuellbedarf erkannt ODER kein passender Bot verfuegbar");
+        return true;
+    }
+
     // .bottest status <accountId>
     static bool HandleBotTestStatus(ChatHandler* handler, char const* args)
     {
@@ -873,6 +891,13 @@ public:
             if (sBotMgr->IsBotPatrolActive(accountId))
                 handler->PSendSysMessage("[bottest] status(account %u): Patrol AKTIV - Zyklus %u/%u abgeschlossen.",
                     accountId, sBotMgr->GetBotPatrolCyclesCompleted(accountId), sBotMgr->GetBotPatrolCyclesTotal(accountId));
+
+            // Gruppe Stufe 2, Teil A: LFG-Zustand zusaetzlich sichtbar machen (dieselbe Begruendung wie
+            // beim Tod-Handling-Zusatz aus Runde 132 oben) - sLFGMgr->GetState()/GetSelectedDungeons()
+            // sind bereits oeffentliche, rein lesende LFGMgr-Methoden, kein neuer Core-Zugriff noetig.
+            lfg::LfgState lfgState = sLFGMgr->GetState(player->GetGUID());
+            handler->PSendSysMessage("[bottest] status(account %u): LFG-Zustand=%s (roh=%u).", accountId,
+                lfg::GetStateString(lfgState).c_str(), uint32(lfgState));
         }
         else
             handler->PSendSysMessage("[bottest] status(account %u): %s - kein Player-Objekt vorhanden.", accountId, stateStr);

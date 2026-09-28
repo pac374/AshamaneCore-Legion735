@@ -193,6 +193,7 @@
 #include "ObjectGuid.h"
 #include "BotCharacter.h"
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include <string>
 
@@ -735,6 +736,68 @@ public:
     // architektonisch nicht vorhanden (kein Scope-Verlust gegenueber dem Core).
     bool SkillBotArtifact(uint32 botAccountId, uint32 levelBudget);
 
+    // --- Gruppe Stufe 2, Teil A (LFG-Pool-Matchmaking) nach Design lcf2r138 -------------------------
+    //
+    // Voller Design-Bericht: C:\LegionServer\reports\lcf2r138_2026-09-28_playerbots_gruppe_stufe2_lfg_artefakt_design.md
+    // (Abschnitt "Teil A"). Umsetzung folgt der dort empfohlenen Architektur ("Kern-Pfad wiederverwenden,
+    // kein Bot-Sonderweg"): ein Fuell-Bot wird SOLO (ohne eigene Gruppe) exakt wie ein echter
+    // Solo-Spieler per LFGMgr::JoinLfg() in die bestehende, bereits produktive Queue eingereiht -
+    // LFGQueue::FindGroups()/CheckCompatibility() und LFGMgr::MakeNewGroup() (Group::AddMember(), siehe
+    // Kopfkommentar-Referenz "LFGMgr::JoinLfg() -> ... -> Group::AddMember()") bleiben UNVERAENDERT und
+    // matchen den Bot ganz normal zusammen mit echten Spielern. Level-/Ilvl-Passung passiert dadurch
+    // KOSTENLOS ueber den bereits vorhandenen Lock-Check LFGMgr::GetCompatibleDungeons() (prueft
+    // LFGDungeonData::minlevel/maxlevel/requiredItemLevel gegen Player::getLevel()/
+    // GetAverageItemLevelEquipped() - funktioniert transparent fuer einen Bot, weil er ein echter
+    // Player mit echten, aus dem Equipment-Pool (Runde 135) ausgeruesteten Items ist) - JoinLfg()
+    // schlaegt fuer einen ungeeigneten Bot lediglich sauber fehl (dungeons.empty() -> LFG_JOIN_*-
+    // Fehlercode, sendet nur ein fuer Bots ohnehin socket-sicheres Ergebnis-Paket, keine Mutation),
+    // KEIN eigener Level-/Ilvl-Vorab-Check in BotMgr noetig oder sinnvoll (waere Logikduplizierung).
+    //
+    // Nur drei nachtraeglich noetige, rein additive Erweiterungen im LFG-Kern selbst (siehe
+    // LFGQueue::GetQueueDataStore() und LFGMgr::GetQueuesForTeam()/GetProposalId() - alle rein lesend,
+    // kein bestehender Aufrufpfad geaendert): der Kern hatte bisher keinen Weg, von AUSSEN (ausserhalb
+    // von LFGMgr/LFGQueue selbst) festzustellen, WER gerade wartet und WORAUF eine laufende Proposal
+    // von einem Spieler ohne Client (kein CMSG_LFG_PROPOSAL_RESULT-Antwortpfad) wartet.
+    //
+    // Lazy-Nachfuell-Trigger (Auftragsvorgabe, Skalierungsrisiko bei 500+ Bots vermeiden): KEINE
+    // Dauer-Queue (Bots stehen NICHT permanent in der LFG-Queue). Stattdessen prueft
+    // ProcessLfgPoolFillTick() periodisch (siehe LFG_POOL_FILL_INTERVAL_MS in der .cpp) ALLE aktiven
+    // Queues beider Fraktionen auf Kandidaten mit MINDESTENS EINEM echten (Nicht-Bot-)Mitglied, die
+    // entweder laenger als LFG_POOL_FILL_WAIT_THRESHOLD_SECONDS warten ODER denen eine per
+    // LFGMgr::GetRoleCountByQueueId() als Pflicht markierte Rolle (Tank/Heiler) komplett fehlt - und
+    // reiht dafuer HOECHSTENS EINEN passenden, aktuell untaetigen Bot pro Tick ein (kein
+    // Massen-Einreihen, keine Dauerlast). Bot/Spieler-Unterscheidung ueber IsBotPlayerGuid() (siehe
+    // dort) - laut Aufgabenstellung nur zulaessig, wenn zuverlaessig moeglich; siehe dortige
+    // Begruendung, warum das hier zutrifft (kein Fallback auf "nur eigener Account" noetig).
+    //
+    // Trigger-Scope (Auftragsvorgabe): serverweit fuer ALLE echten Spieler beider Fraktionen, nicht nur
+    // fuer einen einzelnen Account - siehe IsBotPlayerGuid()-Begruendung.
+    void ProcessLfgPoolFillTick(uint32 diff);
+
+    // Manueller Einzelschritt (fuer '.bottest lfgfill' und inkrementelles Live-Testen, unabhaengig vom
+    // Timer in ProcessLfgPoolFillTick()): stoesst GENAU EINEN Nachfuell-Versuch ueber alle Queues
+    // beider Fraktionen an. Rueckgabe true, wenn dabei ein Bot per JoinLfg() eingereiht wurde.
+    bool TriggerLfgPoolFillOnce();
+
+    // Fortschritt eines bereits als Fueller aktiven Bots (Proposal automatisch annehmen, da kein
+    // Client existiert, der SMSG_LFG_PROPOSAL_UPDATE beantworten wuerde; Kartenwechsel-Ack
+    // nachreichen, siehe TeleportBot()/Runde 93) - wird aus Tick() fuer JEDEN aktuell als Fueller
+    // getrackten Bot aufgerufen, NICHT als eigener GM-Befehl (rein interne Fortsetzungslogik,
+    // analog zum Patrol-Fortschritt in Tick()).
+    void AdvanceLfgFillerBots();
+
+    // Zuverlaessige Bot/Spieler-Unterscheidung (Auftragsvorgabe: server-weiter Trigger nur zulaessig,
+    // "wenn das System echte Spieler zuverlaessig von Bots unterscheiden kann"). _botSessions (siehe
+    // unten) ist die EINZIGE autoritative Quelle dafuer, welche Accounts/Player-Objekte Bots sind -
+    // anders als eine Account-Id-Bereichs-Heuristik (die bei manuell angelegten/importierten Accounts
+    // falsch liegen koennte) ist dies der Speicher, den BotMgr selbst beim Anlegen/Einloggen jedes
+    // Bots pflegt (CreateBotAccount()/RequestBotLogin()) - ein echter Spieler-Account landet nie darin.
+    // Deshalb ist der in der Aufgabenstellung vorgesehene Fallback ("nur der eigene Account des
+    // Betreibers") hier NICHT noetig; der Trigger wirkt serverweit fuer alle echten Spieler.
+    // Implementierung: linearer Scan ueber _botSessions (Bot-Anzahl laut Aufgabenstellung bis
+    // ~500 - unkritisch fuer einen alle paar Sekunden laufenden Tick, siehe LFG_POOL_FILL_INTERVAL_MS).
+    bool IsBotPlayerGuid(ObjectGuid guid) const;
+
     // --- Hooks, die bereits jetzt gefahrlos verdrahtet werden koennen ------
     //
     // Werden aus PlayerScript-Hooks (bot_scriptloader.cpp) fuer JEDEN
@@ -782,6 +845,20 @@ private:
         float PatrolBX = 0.0f, PatrolBY = 0.0f, PatrolBZ = 0.0f;
     };
     std::unordered_map<uint32, BotSessionEntry> _botSessions;
+
+    // Gruppe Stufe 2, Teil A: Bot-Accounts, die BotMgr aktuell als LFG-Fuell-Kandidat eingereiht hat
+    // (per JoinLfg(), siehe TriggerLfgPoolFillOnce()) - verhindert Doppel-Einreihung desselben Bots
+    // und markiert, fuer welche Bots AdvanceLfgFillerBots() pro Tick den Proposal-/Teleport-Fortschritt
+    // nachziehen muss. Ein Eintrag wird entfernt, sobald der Bot entweder erfolgreich in eine
+    // Dungeon-Gruppe uebernommen wurde (LFG_STATE_DUNGEON) oder die Queue ohne Match wieder verlassen
+    // hat (LFG_STATE_NONE, z.B. Proposal abgelehnt/Timeout) - siehe AdvanceLfgFillerBots().
+    std::unordered_set<uint32> _lfgFillerBotAccountIds;
+
+    // Akkumulator fuer den Lazy-Nachfuell-Timer (siehe ProcessLfgPoolFillTick()/
+    // LFG_POOL_FILL_INTERVAL_MS) - dieselbe Diff-Aufsummierungs-Konvention wie IdleTickAccumMs oben,
+    // aber EINMAL pro BotMgr statt pro Bot-Session (der Trigger prueft serverweit ueber alle Bots
+    // hinweg, nicht pro einzelner Session).
+    uint32 _lfgFillTickAccumMs = 0;
 };
 
 #define sBotMgr BotMgr::instance()

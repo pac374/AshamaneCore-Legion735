@@ -42,6 +42,7 @@
 #include "DB2Stores.h"
 #include "DB2Structure.h"
 #include "ItemDefines.h"
+#include "LFGMgr.h"
 #include <cmath>
 #include <sstream>
 #include <vector>
@@ -371,6 +372,11 @@ void BotMgr::Tick(uint32 diff)
             }
         }
     }
+
+    // Gruppe Stufe 2, Teil A: server-weiter Lazy-Nachfuell-Trigger (siehe BotMgr.h-Kopfkommentar bei
+    // ProcessLfgPoolFillTick()) - EINMAL pro BotMgr::Tick()-Aufruf, nicht pro Bot-Session (der Trigger
+    // prueft ueber alle Bots/Queues hinweg selbst, siehe dortige Implementierung).
+    ProcessLfgPoolFillTick(diff);
 }
 
 // --- Runde N (27.09.2026): Fix fuer den in Runde M gefundenen Shutdown-Absturz -
@@ -735,9 +741,24 @@ bool BotMgr::StartBotAttack(uint32 accountId, ObjectGuid::LowType targetGuid)
 
     bool attackOk = player->Attack(target, true);
 
+    // Bekannter, dokumentierter Nebenbug (README "Gruppe/LFR (Stufe 1)"): ohne einen expliziten
+    // MotionMaster::MoveChase()-Aufruf bleibt der Bot stehen, waehrend Attack() nur den Kampfzustand
+    // (UNIT_STATE_MELEE_ATTACKING/GetVictim()) setzt, aber KEINE Bewegung ansetzt - ein echter Client
+    // haelt die Melee-Reichweite durch eigenes Nachlaufen des Spielers, das hier fehlt. Bei einem
+    // stationaeren Ziel faellt das nicht auf (Bot steht ohnehin schon in Reichweite), bei einem
+    // beweglichen/Critter-Ziel (creature_template.type=8, CREATURE_TYPE_CRITTER, typischerweise mit
+    // RANDOM_MOTION_TYPE) laeuft das Ziel dem Bot ohne Fehlermeldung aus der Reichweite. Fix: denselben
+    // MotionMaster::MoveFollow()-Unterbau wie StartBotFollow() (Runde 137) nutzen, hier aber ueber
+    // MoveChase() (Combat-Aequivalent - haelt Waffenreichweite statt Follow-Abstand, bricht automatisch
+    // ab, sobald der Bot den Kampf verlaesst/AttackStop() aufgerufen wird). Nur bei erfolgreichem
+    // Attack()-Start ausgeloest, damit ein fehlgeschlagener Angriffsversuch keinen verwaisten
+    // Chase-Generator hinterlaesst.
+    if (attackOk)
+        player->GetMotionMaster()->MoveChase(target);
+
     TC_LOG_INFO("scripts.bots", "BotMgr::StartBotAttack: Account %u - Attack() Rueckgabe=%d, "
-        "HasUnitState(MELEE_ATTACKING)=%d, GetVictim() gesetzt=%d.", accountId, attackOk,
-        player->HasUnitState(UNIT_STATE_MELEE_ATTACKING), player->GetVictim() != nullptr);
+        "HasUnitState(MELEE_ATTACKING)=%d, GetVictim() gesetzt=%d, MoveChase() ausgeloest=%d.", accountId,
+        attackOk, player->HasUnitState(UNIT_STATE_MELEE_ATTACKING), player->GetVictim() != nullptr, attackOk);
 
     return attackOk;
 }
@@ -766,7 +787,14 @@ void BotMgr::StopBotAttack(uint32 accountId)
 
     player->AttackStop();
 
-    TC_LOG_INFO("scripts.bots", "BotMgr::StopBotAttack: Account %u - nach AttackStop(): "
+    // Gegenstueck zum MoveChase()-Fix in StartBotAttack(): ohne diesen Abbruch wuerde der zuvor
+    // angesetzte Chase-Generator (MOTION_SLOT_ACTIVE) den Bot weiter Richtung Ziel laufen lassen,
+    // obwohl der Kampf bereits per AttackStop() beendet wurde. Dieselbe Notbremsen-Konvention wie
+    // StopBotFollow() (Runde 137)/StopBotPatrol(): MoveIdle() setzt den aktiven Motion-Slot auf einen
+    // einfachen IdleMovementGenerator zurueck, Bot bleibt sofort an der aktuellen Position stehen.
+    player->GetMotionMaster()->MoveIdle();
+
+    TC_LOG_INFO("scripts.bots", "BotMgr::StopBotAttack: Account %u - nach AttackStop()+MoveIdle(): "
         "HasUnitState(MELEE_ATTACKING)=%d, GetVictim() gesetzt=%d.", accountId,
         player->HasUnitState(UNIT_STATE_MELEE_ATTACKING), player->GetVictim() != nullptr);
 }
@@ -2286,6 +2314,214 @@ bool BotMgr::SkillBotArtifact(uint32 accountId, uint32 levelBudget)
         grantedRanks, budget, currentTier, artifact->GetTotalPurchasedArtifactPowers());
 
     return true;
+}
+
+namespace
+{
+    // Gruppe Stufe 2, Teil A: Tuning-Konstanten fuer den Lazy-Nachfuell-Trigger (siehe volle
+    // Begruendung im BotMgr.h-Kopfkommentar bei ProcessLfgPoolFillTick()/TriggerLfgPoolFillOnce()).
+    // Benannte Konstanten statt Magic Numbers, damit ein spaeterer Tuning-Durchgang (nach einem
+    // echten Live-Test mit realen Wartezeiten) keine Funktionssignaturen aendern muss.
+    constexpr uint32 LFG_POOL_FILL_INTERVAL_MS = 10000;            // alle 10s ein Nachfuell-Versuch
+    constexpr time_t LFG_POOL_FILL_WAIT_THRESHOLD_SECONDS = 30;    // "Warteschlange lange leer"
+    constexpr uint32 LFG_POOL_FILL_MAX_BOT_ATTEMPTS = 8;           // pro Fuellversuch max. Kandidaten testen
+}
+
+bool BotMgr::IsBotPlayerGuid(ObjectGuid guid) const
+{
+    // Siehe Begruendung im BotMgr.h-Kopfkommentar bei dieser Methode: _botSessions ist die einzige
+    // autoritative Quelle, kein Account-Id-Bereich/keine Heuristik. Linearer Scan (Bot-Anzahl laut
+    // Aufgabenstellung bis ~500) - unkritisch, da diese Methode nur aus dem alle ~10s laufenden
+    // Lazy-Nachfuell-Tick heraus in relevanter Zahl aufgerufen wird, nicht pro Weltserver-Frame.
+    for (auto const& [accountId, entry] : _botSessions)
+    {
+        if (entry.Session && entry.Session->GetPlayer() && entry.Session->GetPlayer()->GetGUID() == guid)
+            return true;
+    }
+    return false;
+}
+
+// Gruppe Stufe 2, Teil A: siehe voller Design-Kommentar im BotMgr.h-Kopfkommentar bei dieser Methode.
+bool BotMgr::TriggerLfgPoolFillOnce()
+{
+    using namespace lfg;
+
+    for (uint8 team = TEAM_ALLIANCE; team <= TEAM_HORDE; ++team)
+    {
+        LfgQueueContainer const& queues = sLFGMgr->GetQueuesForTeam(team);
+        for (auto const& [queueId, queue] : queues)
+        {
+            LfgQueueDataContainer const& queueData = queue.GetQueueDataStore();
+            for (auto const& [candidateGuid, data] : queueData)
+            {
+                // Nur Queue-Eintraege mit MINDESTENS EINEM echten (Nicht-Bot-)Mitglied sind fuer den
+                // Trigger relevant - ein reiner Bot-Kandidat (z.B. von uns selbst gerade erst
+                // eingereiht) braucht keinen weiteren Fueller.
+                bool hasRealMember = false;
+                uint8 presentRoles = 0;
+                for (auto const& [memberGuid, role] : data.roles)
+                {
+                    if (!IsBotPlayerGuid(memberGuid))
+                        hasRealMember = true;
+                    presentRoles |= role;
+                }
+
+                if (!hasRealMember)
+                    continue;
+
+                LfgQueueRoleCount const roleCount = LFGMgr::GetRoleCountByQueueId(queueId);
+                bool missingTank = roleCount.minTanks > 0 && !(presentRoles & PLAYER_ROLE_TANK);
+                bool missingHealer = roleCount.minHealers > 0 && !(presentRoles & PLAYER_ROLE_HEALER);
+
+                time_t waited = time(nullptr) - data.joinTime;
+                if (waited < LFG_POOL_FILL_WAIT_THRESHOLD_SECONDS && !missingTank && !missingHealer)
+                    continue; // Auftragsvorgabe: "erst bei Bedarf", noch keine Notwendigkeit erkannt
+
+                uint8 desiredRole = missingTank ? PLAYER_ROLE_TANK : (missingHealer ? PLAYER_ROLE_HEALER : PLAYER_ROLE_DAMAGE);
+                LfgDungeonSet const dungeonsForBot = data.dungeons;
+
+                uint32 attempts = 0;
+                for (auto& [accountId, entry] : _botSessions)
+                {
+                    if (attempts >= LFG_POOL_FILL_MAX_BOT_ATTEMPTS)
+                        break;
+
+                    if (!entry.Session || entry.State != BotCharacterState::STATE_IN_WORLD)
+                        continue;
+                    if (_lfgFillerBotAccountIds.count(accountId))
+                        continue;
+
+                    Player* botPlayer = entry.Session->GetPlayer();
+                    if (!botPlayer || !botPlayer->IsInWorld() || botPlayer->GetGroup())
+                        continue;
+                    if (botPlayer->GetTeamId() != TeamId(team))
+                        continue;
+                    if (sLFGMgr->GetState(botPlayer->GetGUID()) != LFG_STATE_NONE)
+                        continue; // sollte bei korrektem _lfgFillerBotAccountIds-Tracking nicht vorkommen - Sicherheitsnetz
+
+                    ++attempts;
+
+                    // JoinLfg() nimmt eine nicht-const Referenz und mutiert/filtert die uebergebene
+                    // Dungeon-Menge (GetCompatibleDungeons()) - fuer jeden Kandidaten-Bot eine frische
+                    // Kopie uebergeben, damit ein fehlgeschlagener Versuch die Auswahl fuer den
+                    // naechsten Kandidaten nicht verfaelscht.
+                    LfgDungeonSet dungeonsCopy = dungeonsForBot;
+
+                    TC_LOG_INFO("scripts.bots", "BotMgr::TriggerLfgPoolFillOnce: Queue %u - echter Kandidat %s "
+                        "wartet %lld s (fehlende Pflichtrolle: Tank=%d Heiler=%d) - versuche Account %u ('%s') "
+                        "als Rolle %u einzureihen.", queueId, candidateGuid.ToString().c_str(), (long long)waited,
+                        missingTank, missingHealer, accountId, botPlayer->GetName().c_str(), uint32(desiredRole));
+
+                    sLFGMgr->JoinLfg(botPlayer, desiredRole, dungeonsCopy);
+
+                    if (sLFGMgr->GetState(botPlayer->GetGUID()) != LFG_STATE_NONE)
+                    {
+                        _lfgFillerBotAccountIds.insert(accountId);
+                        TC_LOG_INFO("scripts.bots", "BotMgr::TriggerLfgPoolFillOnce: Account %u erfolgreich in "
+                            "Queue %u eingereiht (LfgState=%u) - AdvanceLfgFillerBots() uebernimmt den weiteren "
+                            "Fortschritt (Proposal/Teleport).", accountId, queueId,
+                            uint32(sLFGMgr->GetState(botPlayer->GetGUID())));
+                        return true; // Auftragsvorgabe: hoechstens EIN Bot pro Aufruf/Tick, keine Dauerlast
+                    }
+
+                    TC_LOG_INFO("scripts.bots", "BotMgr::TriggerLfgPoolFillOnce: Account %u von JoinLfg() "
+                        "abgelehnt (Level-/Ilvl-/Lock-Check ueber GetCompatibleDungeons() nicht erfuellt fuer "
+                        "diese Dungeon-Auswahl) - naechster Kandidat.", accountId);
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+// Gruppe Stufe 2, Teil A: siehe voller Design-Kommentar im BotMgr.h-Kopfkommentar bei dieser Methode.
+void BotMgr::AdvanceLfgFillerBots()
+{
+    using namespace lfg;
+
+    if (_lfgFillerBotAccountIds.empty())
+        return;
+
+    std::vector<uint32> toErase;
+    for (uint32 accountId : _lfgFillerBotAccountIds)
+    {
+        auto itr = _botSessions.find(accountId);
+        if (itr == _botSessions.end() || !itr->second.Session)
+        {
+            toErase.push_back(accountId);
+            continue;
+        }
+
+        Player* botPlayer = itr->second.Session->GetPlayer();
+        if (!botPlayer || !botPlayer->IsInWorld())
+        {
+            toErase.push_back(accountId);
+            continue;
+        }
+
+        ObjectGuid guid = botPlayer->GetGUID();
+        LfgState state = sLFGMgr->GetState(guid);
+
+        if (state == LFG_STATE_PROPOSAL)
+        {
+            uint32 proposalId = sLFGMgr->GetProposalId(guid);
+            if (proposalId)
+            {
+                TC_LOG_INFO("scripts.bots", "BotMgr::AdvanceLfgFillerBots: Account %u - Proposal %u aktiv, kein "
+                    "Client vorhanden - rufe automatisch UpdateProposal(true) auf (ersetzt das ausbleibende "
+                    "CMSG_LFG_PROPOSAL_RESULT).", accountId, proposalId);
+                sLFGMgr->UpdateProposal(proposalId, guid, true);
+            }
+        }
+
+        // Egal ob durch den Aufruf direkt oben (letzte noch ausstehende Zusage - MakeNewGroup()/
+        // TeleportPlayer() laufen synchron INNERHALB von UpdateProposal(), siehe LFGMgr.cpp) oder durch
+        // einen spaeter zusagenden ECHTEN Mitspieler auf einem frueheren Tick bereits ausgeloest:
+        // derselbe HandleMoveWorldportAck()-Nachtrag wie TeleportBot() (Runde 93), falls der Bot gerade
+        // einen Kartenwechsel eingeleitet hat, den er ohne Client nie selbst per MSG_MOVE_WORLDPORT_ACK
+        // bestaetigen wuerde.
+        if (botPlayer->IsBeingTeleportedFar())
+        {
+            TC_LOG_INFO("scripts.bots", "BotMgr::AdvanceLfgFillerBots: Account %u - IsBeingTeleportedFar()=true "
+                "(LFG-Dungeon-Teleport), rufe manuell HandleMoveWorldportAck() auf.", accountId);
+            itr->second.Session->HandleMoveWorldportAck();
+        }
+
+        if (state == LFG_STATE_DUNGEON || state == LFG_STATE_FINISHED_DUNGEON)
+        {
+            TC_LOG_INFO("scripts.bots", "BotMgr::AdvanceLfgFillerBots: Account %u - Gruppe gefunden und Dungeon "
+                "betreten (LfgState=%u), Fueller-Auftrag erfuellt, Bot bleibt regulaeres Gruppenmitglied.",
+                accountId, uint32(state));
+            toErase.push_back(accountId);
+        }
+        else if (state == LFG_STATE_NONE)
+        {
+            TC_LOG_INFO("scripts.bots", "BotMgr::AdvanceLfgFillerBots: Account %u - ohne Match wieder aus der "
+                "LFG-Queue entfernt (Proposal abgelehnt oder Timeout) - Fueller-Slot freigegeben.", accountId);
+            toErase.push_back(accountId);
+        }
+        // LFG_STATE_QUEUED/ROLECHECK: weiter warten, Matching laeuft tick-gesteuert in
+        // LFGMgr::Update()->LFGQueue::FindGroups(), keine weitere Aktion hier noetig.
+    }
+
+    for (uint32 accountId : toErase)
+        _lfgFillerBotAccountIds.erase(accountId);
+}
+
+void BotMgr::ProcessLfgPoolFillTick(uint32 diff)
+{
+    // Fortschritt bereits aktiver Fueller-Bots JEDEN Tick pruefen (Proposal-Fenster ist mit
+    // LFG_TIME_PROPOSAL=45s knapp - hier zu selten nachzusehen wuerde Proposals unnoetig verfallen
+    // lassen), das eigentliche NEU-Einreihen dagegen nur alle LFG_POOL_FILL_INTERVAL_MS (siehe dort).
+    AdvanceLfgFillerBots();
+
+    _lfgFillTickAccumMs += diff;
+    if (_lfgFillTickAccumMs < LFG_POOL_FILL_INTERVAL_MS)
+        return;
+
+    _lfgFillTickAccumMs = 0;
+    TriggerLfgPoolFillOnce();
 }
 
 bool BotMgr::CreateBot(uint32 /*ownerAccountId*/, std::string const& botCharacterName)
