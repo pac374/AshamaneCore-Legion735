@@ -3018,6 +3018,58 @@ namespace
                 { "Demonbolt",          BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Demonic Core" },
                 { "Shadow Bolt",        BotRotationCondition::Always }
             }
+        },
+
+        // ==================== Runde 4: die letzten 3 Skillungen - 36/36 vollstaendig ====================
+
+        // --- Shaman Enhancement (specId 263) - Nahkampf-DPS --- HOCH auf den Generator/Spender-Loop
+        // (Boulderfist/Rockbiter baut Maelstrom auf, Stormstrike/Lava Lash geben es aus), MITTEL auf die
+        // genaue Talentreihen-Platzierung der Level-100-Cooldown-Wahl (laut Recherche selbst als
+        // niedrigste Konfidenz-Einzelheit markiert - hier bewusst nicht aufgenommen). Der Stormbringer-
+        // Freicast-Proc AENDERT laut Recherche nicht WELCHE Faehigkeit gecastet wird (weiterhin
+        // Stormstrike), nur ihre Kosten/ihr Cooldown - deshalb reicht ein einfacher "Always"-Schritt statt
+        // einer eigenen Proc-Bedingung (anders als z.B. bei Frost Mage, wo der Proc die Faehigkeitswahl
+        // selbst bestimmt).
+        {
+            263, SPELLFAMILY_SHAMAN, BotRole::MeleeDps,
+            {
+                { "Feral Spirit", BotRotationCondition::Always },
+                { "Stormstrike",  BotRotationCondition::Always },
+                { "Lava Lash",    BotRotationCondition::Always },
+                { "Boulderfist",  BotRotationCondition::Always }
+            }
+        },
+        // --- Druid Feral (specId 103) - Nahkampf-DPS --- HOCH auf die Rake/Rip/Savage-Roar-Dauerpflege-
+        // Identitaet (7.3.5-spezifisch bestaetigt: Savage-Roar-Dauer erhoeht/Schadensbonus gesenkt
+        // gegenueber frueherem Legion-Patch, siehe Recherche). Savage Roar selbst (reiner Schadens-Buff,
+        // keine DoT/Aura-auf-Ziel) bewusst weggelassen - passt nicht sauber in AuraMissingOnSelf ohne
+        // eigene Prioritaets-Verzerrung. Rip/Ferocious-Bite-Kombopunkt-Kosten werden NICHT separat
+        // geprueft (kein UND-Verknuepfer fuer zwei Bedingungen im aktuellen Vokabular) - verlaesst sich
+        // auf die core-eigene Ressourcenpruefung beim tatsaechlichen Cast-Versuch (dieselbe dokumentierte
+        // Vereinfachung wie bei Windwalker Monk).
+        {
+            103, SPELLFAMILY_DRUID, BotRole::MeleeDps,
+            {
+                { "Tiger's Fury",   BotRotationCondition::Always },
+                { "Rake",           BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Rake" },
+                { "Rip",            BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Rip" },
+                { "Ferocious Bite", BotRotationCondition::ResourceAtLeast, 5.0f, POWER_COMBO_POINTS },
+                { "Shred",          BotRotationCondition::Always }
+            }
+        },
+        // --- Druid Guardian (specId 104) - Tank --- HOCH: Ironfur als kontinuierlich zu erneuernde
+        // aktive Mitigation ist derselbe "diese Faehigkeit hochhalten"-Musterfall wie Shield Block
+        // (Warrior)/Shield of the Righteous (Paladin)/Demon Spikes (DH) oben - Recherche bestaetigt
+        // explizit "Ironfur vor Mangle/Thrash priorisieren, wenn physischer Schaden eingeht".
+        {
+            104, SPELLFAMILY_DRUID, BotRole::Tank,
+            {
+                { "Ironfur", BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Ironfur" },
+                { "Mangle",  BotRotationCondition::Always },
+                { "Thrash",  BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Thrash" },
+                { "Moonfire", BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Moonfire" },
+                { "Maul",    BotRotationCondition::Always }
+            }
         }
     };
 }

@@ -885,15 +885,20 @@ public:
     // Design-Kommentar oben bei BotRotationStep/BotSpecRotation sowie bei ResolveSpellIdByName() und
     // g_BotSpecRotations (BotMgr.cpp) fuer die Quellenlage.
     //
-    // Umfang: 29 von 36 Skillungen haben einen Eintrag in g_BotSpecRotations (BotMgr.cpp) - Runde 1
-    // deckte vier Pilot-Skillungen ab (je eine pro Rollen-Archetyp: Protection Warrior/Tank,
-    // Fury Warrior/Nahkampf-DPS, Frost Mage/Fernkampf-DPS, Restoration Shaman/Heiler), Runde 2 hat auf
-    // Basis derselben Recherche 25 weitere ergaenzt (siehe voller Kommentar bei g_BotSpecRotations fuer
-    // Quelle/Konfidenz je Skillung). 7 Skillungen sind BEWUSST noch offen, weil ihre Kernmechanik
-    // (Atonement-Dual-Ziel, Stagger-Schweregrad, Mehr-Tick-Combo-Timing) nicht in das aktuelle
-    // Bedingungs-Vokabular passt (siehe dortiger Kommentar fuer die vollstaendige Liste/Begruendung) -
-    // Framework-Erweiterung, keine reine Dateneingabe mehr. Jede offene Skillung hat schlicht KEINEN
-    // Eintrag in g_BotSpecRotations - GetOrResolveSpecRotation() liefert dann nullptr,
+    // Umfang: ALLE 36 Skillungen haben einen Eintrag in g_BotSpecRotations (BotMgr.cpp), ueber vier
+    // Runden aufgebaut (siehe voller Kommentar dort fuer Quelle/Konfidenz je Skillung):
+    //   - Runde 1: vier Pilot-Skillungen, je eine pro Rollen-Archetyp (Protection Warrior/Tank,
+    //     Fury Warrior/Nahkampf-DPS, Frost Mage/Fernkampf-DPS, Restoration Shaman/Heiler).
+    //   - Runde 2: 25 weitere auf Basis derselben Recherche (reine Dateneingabe).
+    //   - Runde 3: vier zuvor ausgeschlossene Skillungen ueber die neue BotRotationTargetOverride-
+    //     Erweiterung bzw. dokumentierte Vereinfachungen geloest (Discipline Priest, Brewmaster/
+    //     Windwalker Monk, Demonology Warlock - letzterer mit NIEDRIGER Recherche-Konfidenz).
+    //   - Runde 4: die letzten drei (Enhancement Shaman, Feral/Guardian Druid) nach gezielter
+    //     Zusatzrecherche ergaenzt.
+    // Trotz vollstaendiger Abdeckung bleiben pro Skillung dokumentierte Vereinfachungen bestehen (siehe
+    // Kommentar je Tabelleneintrag) - "verdrahtet" bedeutet NICHT "perfekt bis ins Detail", sondern
+    // "strukturell korrekt mit klar benannten Einschraenkungen". Sollte eine zukuenftige Skillung
+    // dennoch fehlen (z.B. neue ChrSpecialization), liefert GetOrResolveSpecRotation() nullptr und
     // ProcessBotCombatAI() tut in diesem Fall NICHTS zusaetzlich (der Bot bleibt beim bereits
     // bestehenden reinen Nahkampf-Auto-Attack-Verhalten aus StartBotAttack(), falls per GM-Befehl
     // ausgeloest) - kein Absturz, kein falsches Verhalten, einfach "noch nicht implementiert".
