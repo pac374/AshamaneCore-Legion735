@@ -255,7 +255,8 @@ wird ausschliesslich das **Feature-Konzept** (was soll das Modul koennen), die I
 eine eigenstaendige Neuentwicklung gegen unsere eigenen Core-APIs:
 
 - **[mod-dungeon-clear](https://github.com/jrad7/mod-dungeon-clear)** (Referenz fuer: autonomer Dungeon-Clear-
-  Modus). Kernidee, die uebernommen wird: Routen werden **live aus dem Navmesh generiert, keine
+  Modus) - **umgesetzt** (`BotMgr::SetDungeonClearMode()`/`ProcessDungeonClear()`). Kernidee, die
+  uebernommen wird: Routen werden **live aus dem Navmesh generiert, keine
   handgepflegten Wegpunkte pro Dungeon** - das passt direkt zu unserer bereits bestaetigten
   `MotionMaster::MovePoint(generatePath=true)`-Navmesh-Bewegung (Runde U/`MoveBotTestStepPath()`). Unsere
   Variante navigiert autonom zum naechsten lebenden Dungeon-Boss auf der aktuellen Karte (ueber
@@ -282,12 +283,18 @@ eine eigenstaendige Neuentwicklung gegen unsere eigenen Core-APIs:
   Preisformel-Tabelle, Mehrfach-Bot-Namen) waeren ein separates, kleineres Ausbauprojekt AUF dem bereits
   vorhandenen nativen System, keine Neuentwicklung von Grund auf.
 - **[mod-ollama-chat](https://github.com/DustinHendrickson/mod-ollama-chat)** (Referenz fuer: LLM-gestuetzter
-  Bot-Chat). Kernidee: Bot-Antworten auf Spieler-Chat werden ueber eine lokale Ollama-HTTP-API generiert statt
-  fest verdrahtet/zufaellig gewuerfelt. Die dabei verwendeten Drittbibliotheken cpp-httplib und nlohmann/json
-  sind selbst **MIT-lizenziert** (nicht Teil des AGPL-Moduls) - deren Verwendung (frisch vom jeweiligen
-  Upstream-Repo, nicht aus mod-ollama-chat kopiert) ist deshalb unproblematisch; die eigentliche Integrations-
-  Logik (Prompt-Aufbau, Chat-Hook, Konfiguration) wird komplett neu gegen unsere `WorldSession`/Chat-Handler-
-  Struktur geschrieben.
+  Bot-Chat) - **umgesetzt** unter `src/server/scripts/Custom/OllamaChat/`. Kernidee: whispert ein echter
+  Spieler einen Bot an, generiert der Bot seine Antwort ueber eine lokale Ollama-HTTP-API statt gar nicht/
+  zufaellig zu antworten. Bewusst KEINE Drittbibliothek vendored (das Referenzmodul nutzt cpp-httplib +
+  nlohmann/json, beide MIT-lizenziert und fuer sich unproblematisch mit GPL-2.0 kombinierbar - das war
+  nicht der Hinderungsgrund): stattdessen ein minimaler, selbst geschriebener HTTP/1.1-Client auf
+  `boost::asio`-Basis (bereits eine verlinkte Core-Abhaengigkeit, siehe `OllamaHttpClient.h/.cpp`) plus
+  handgeschriebene String-basierte JSON-Konstruktion/-Extraktion (`OllamaChatMgr.cpp`) - fuer den engen
+  Anwendungsfall (ein JSON-POST, ein JSON-Feld auslesen) angemessen und ohne ~56.000 Zeilen ungetesteten
+  Fremdcode. Der eigentliche HTTP-Request laeuft auf einem dedizierten Hintergrund-Thread pro Anfrage
+  (siehe `OllamaChatMgr.h`-Kopfkommentar fuer das volle Thread-Sicherheits-Modell) - blockiert also NICHT
+  den World-Update-Thread. Dokumentierte Einschraenkungen: kein TLS, kein Chunked-Transfer-Encoding, kein
+  explizites Timeout, keine Konversations-Historie/Persoenlichkeits-Profile wie im Referenzmodul.
 
 Umsetzungsstand dieser drei Punkte: siehe Commit-Historie/PRs nach diesem README-Stand - wird hier bewusst nicht
 laufend nachgepflegt, um Drift zwischen Code und Dokumentation zu vermeiden; der PR-Text der jeweiligen

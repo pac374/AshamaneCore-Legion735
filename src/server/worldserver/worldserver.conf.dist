@@ -4183,3 +4183,74 @@ BattlePay.Currency = 1
 NetherlightCrucible.ClientUI = 0
 #
 ###################################################################################################
+
+###################################################################################################
+# OLLAMA CHAT (Playerbots-Modul, Ideenreferenz mod-ollama-chat - siehe README Abschnitt e) fuer die
+# Lizenz-/Kompatibilitaets-Begruendung: komplett neu gegen diesen Core geschrieben, keine Codezeile aus
+# dem AGPL-3.0-Referenzmodul uebernommen, nur das Feature-Konzept. Voller Design-Kommentar in
+# src/server/scripts/Custom/OllamaChat/OllamaChatMgr.h/.cpp)
+#
+#    OllamaChat.Enable
+#       Description: Bots (Playerbots-Modul) antworten auf Whispers echter Spieler ueber eine lokale
+#                    Ollama-LLM-API statt gar nicht/zufaellig zu antworten. Erfordert einen laufenden
+#                    Ollama-Server (siehe OllamaChat.Host/.Port) - ist dieser nicht erreichbar, bleibt
+#                    die Antwort einfach aus (kein Absturz, siehe Server.log Kanal "scripts.ollamachat").
+#       Default:     0
+#
+
+OllamaChat.Enable = 0
+
+#
+#    OllamaChat.Host
+#       Description: Hostname/IP des Ollama-Servers (siehe https://ollama.com). NUR unverschluesseltes
+#                    HTTP wird unterstuetzt (kein TLS in dieser ersten Runde) - Ollama laeuft
+#                    standardmaessig ohnehin ausschliesslich lokal/unverschluesselt.
+#       Default:     "127.0.0.1"
+#
+
+OllamaChat.Host = "127.0.0.1"
+
+#
+#    OllamaChat.Port
+#       Description: Port des Ollama-Servers.
+#       Default:     11434 (Ollama-Standardport)
+#
+
+OllamaChat.Port = 11434
+
+#
+#    OllamaChat.Model
+#       Description: Name des in Ollama geladenen Modells (z.B. "llama3", "mistral") - muss vorher per
+#                    "ollama pull <model>" heruntergeladen worden sein.
+#       Default:     "llama3"
+#
+
+OllamaChat.Model = "llama3"
+
+#
+#    OllamaChat.SystemPrompt
+#       Description: System-Prompt-Praefix, das jeder Anfrage vorangestellt wird (steuert Tonfall/
+#                    Rollenspiel-Verhalten der Bot-Antworten). Der Wert hier MUSS mit dem eingebauten
+#                    C++-Standardwert in OllamaChatMgr.h uebereinstimmen (bzw. bewusst davon abweichen) -
+#                    ist dieser Schluessel in der eigenen worldserver.conf NICHT gesetzt, greift
+#                    ohnehin der C++-Standardwert, nicht dieser Default-Text hier.
+#       Default:     siehe Wert unten (identisch zum eingebauten C++-Standardwert in OllamaChatMgr.h)
+#
+
+OllamaChat.SystemPrompt = "You are a World of Warcraft player character in a Legion (patch 7.3.5) roleplay setting. Reply in-character, in a single short chat line (max ~200 characters), no markdown, no meta commentary about being an AI."
+
+#
+#    OllamaChat.MaxConcurrentRequests
+#       Description: Maximale Anzahl GLEICHZEITIG laufender Ollama-HTTP-Anfragen (je ein eigener
+#                    Hintergrund-Thread, siehe OllamaChatMgr.h). Weitere Whispers werden waehrenddessen
+#                    ignoriert (kein Backlog/Queueing in dieser ersten Runde) - Sicherheitsnetz gegen
+#                    Spam und gegen zu viele gleichzeitige Anfragen an einen einzelnen lokalen
+#                    Ollama-Prozess.
+#       Default:     4
+#
+
+OllamaChat.MaxConcurrentRequests = 4
+
+#
+###################################################################################################
+###################################################################################################
