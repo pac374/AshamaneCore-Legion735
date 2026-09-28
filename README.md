@@ -258,18 +258,29 @@ eine eigenstaendige Neuentwicklung gegen unsere eigenen Core-APIs:
   Modus). Kernidee, die uebernommen wird: Routen werden **live aus dem Navmesh generiert, keine
   handgepflegten Wegpunkte pro Dungeon** - das passt direkt zu unserer bereits bestaetigten
   `MotionMaster::MovePoint(generatePath=true)`-Navmesh-Bewegung (Runde U/`MoveBotTestStepPath()`). Unsere
-  Variante navigiert autonom zum naechsten lebenden Boss-Rang-NPC auf der aktuellen Karte (ueber
-  `CreatureTemplate::rank`, keine Dungeon-spezifischen Daten noetig), engagiert Trash automatisch ueber die
+  Variante navigiert autonom zum naechsten lebenden Dungeon-Boss auf der aktuellen Karte (ueber
+  `Creature::IsDungeonBoss()` - dynamisch aus der `instance_encounters`-Tabelle gesetztes `flags_extra`-Bit,
+  zuverlaessiger als `CreatureTemplate::rank`, keine Dungeon-spezifischen Daten unsererseits noetig), engagiert
+  Trash automatisch ueber die
   bereits bestehende `SelectBotCombatTarget()`-Mit-Kampf-Logik und loest nach jedem Kill automatisch
   `BotLootTarget()` aus. Bewusst NICHT uebernommen (zu grosser Umfang fuer eine erste Runde, braucht
   Dungeon-spezifische Skript-Kenntnis, die wir fuer Legion-Instanzen nicht recherchiert haben): Boss-Mechanik-
   Ausweichen, Pull-Stile (Leeroy/Advanced/Dynamic), Encounter-Skripte (Hebel/Altare/Eskorten), Heiler-
   Positionierung, Tod-Wiederbelebungs-Choreographie.
-- **[mod-ah-bot-plus](https://github.com/NathanHandley/mod-ah-bot-plus)** (Referenz fuer: Auktionshaus-Bot).
-  Kernidee: ein konfigurierter, echter (nicht zwingend eingeloggter) Charakter tritt periodisch als
-  Verkaeufer/Kaeufer am Auktionshaus auf, Preisbildung rein config-getrieben (Kategorie/Qualitaet/Itemlevel-
-  Multiplikatoren, kein SQL-Tuning noetig). Unsere Variante implementiert das komplett neu gegen
-  `AuctionHouseMgr`/`AuctionPosting` dieses Cores.
+- **[mod-ah-bot-plus](https://github.com/NathanHandley/mod-ah-bot-plus)** (Referenz fuer: Auktionshaus-Bot) -
+  **Recherche-Ergebnis: braucht keine Neuentwicklung.** Dieser TrinityCore-Fork bringt unter
+  `src/server/game/AuctionHouseBot/` (`AuctionHouseBot.*`, `AuctionHouseBotSeller.*`,
+  `AuctionHouseBotBuyer.*`, GM-Befehle in `src/server/scripts/Commands/cs_ahbot.cpp`) bereits ein
+  vollstaendiges, natives Seller-/Buyer-Auktionshaus-Bot-System mit - GPL-2.0 (TrinityCore-eigener Code,
+  nicht das AGPL-Referenzmodul), funktional gleichwertig zum Kernkonzept von mod-ah-bot-plus (config-
+  getriebene Preisbildung nach Kategorie/Qualitaet/Itemlevel, periodisches Listen/Kaufen ueber
+  echte-aber-nie-eingeloggte Bot-Account-Charaktere, GM-Befehle `.ahbot reload/empty/update`). Aktuell
+  **deaktiviert** (`AuctionHouseBot.Seller.Enabled = 0` in `worldserver.conf.dist`, Zeile ~3304) - der
+  naechste Schritt ist reine Konfiguration/Inbetriebnahme (Bot-Account mit ein paar nie einzuloggenden
+  Charakteren anlegen, `AuctionHouseBot.Account`/`.Seller.Enabled`/`.Buyer.*.Enabled` setzen), kein
+  C++-Code noetig. Die "Plus"-Verbesserungen der Referenz (non-SQL-Kategorie-Konfiguration, erweiterte
+  Preisformel-Tabelle, Mehrfach-Bot-Namen) waeren ein separates, kleineres Ausbauprojekt AUF dem bereits
+  vorhandenen nativen System, keine Neuentwicklung von Grund auf.
 - **[mod-ollama-chat](https://github.com/DustinHendrickson/mod-ollama-chat)** (Referenz fuer: LLM-gestuetzter
   Bot-Chat). Kernidee: Bot-Antworten auf Spieler-Chat werden ueber eine lokale Ollama-HTTP-API generiert statt
   fest verdrahtet/zufaellig gewuerfelt. Die dabei verwendeten Drittbibliotheken cpp-httplib und nlohmann/json
