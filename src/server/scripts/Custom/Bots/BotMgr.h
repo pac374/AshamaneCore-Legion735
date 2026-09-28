@@ -871,17 +871,18 @@ public:
     // Design-Kommentar oben bei BotRotationStep/BotSpecRotation sowie bei ResolveSpellIdByName() und
     // g_BotSpecRotations (BotMgr.cpp) fuer die Quellenlage.
     //
-    // Umfang dieser ersten Runde (bewusst nicht alle 36 Skillungen auf einmal, siehe PR-Bericht fuer
-    // die volle Roadmap-Tabelle): VIER Pilot-Skillungen, je eine pro Rollen-Archetyp, mit der
-    // hoechsten Recherche-Konfidenz aus der Rechercherunde -
-    //   - Tank: Protection Warrior (specId 73)
-    //   - Nahkampf-DPS: Fury Warrior (specId 72)
-    //   - Fernkampf/Zauber-DPS: Frost Mage (specId 64)
-    //   - Heiler: Restoration Shaman (specId 264)
-    // Jede andere Skillung hat schlicht KEINEN Eintrag in g_BotSpecRotations - GetOrResolveSpecRotation()
-    // liefert dann nullptr, ProcessBotCombatAI() tut in diesem Fall NICHTS zusaetzlich (der Bot bleibt
-    // beim bereits bestehenden reinen Nahkampf-Auto-Attack-Verhalten aus StartBotAttack(), falls per
-    // GM-Befehl ausgeloest) - kein Absturz, kein falsches Verhalten, einfach "noch nicht implementiert".
+    // Umfang: 29 von 36 Skillungen haben einen Eintrag in g_BotSpecRotations (BotMgr.cpp) - Runde 1
+    // deckte vier Pilot-Skillungen ab (je eine pro Rollen-Archetyp: Protection Warrior/Tank,
+    // Fury Warrior/Nahkampf-DPS, Frost Mage/Fernkampf-DPS, Restoration Shaman/Heiler), Runde 2 hat auf
+    // Basis derselben Recherche 25 weitere ergaenzt (siehe voller Kommentar bei g_BotSpecRotations fuer
+    // Quelle/Konfidenz je Skillung). 7 Skillungen sind BEWUSST noch offen, weil ihre Kernmechanik
+    // (Atonement-Dual-Ziel, Stagger-Schweregrad, Mehr-Tick-Combo-Timing) nicht in das aktuelle
+    // Bedingungs-Vokabular passt (siehe dortiger Kommentar fuer die vollstaendige Liste/Begruendung) -
+    // Framework-Erweiterung, keine reine Dateneingabe mehr. Jede offene Skillung hat schlicht KEINEN
+    // Eintrag in g_BotSpecRotations - GetOrResolveSpecRotation() liefert dann nullptr,
+    // ProcessBotCombatAI() tut in diesem Fall NICHTS zusaetzlich (der Bot bleibt beim bereits
+    // bestehenden reinen Nahkampf-Auto-Attack-Verhalten aus StartBotAttack(), falls per GM-Befehl
+    // ausgeloest) - kein Absturz, kein falsches Verhalten, einfach "noch nicht implementiert".
     //
     // Wird pro eingeloggtem Bot alle ~400ms aus Tick() aufgerufen (eigener Akkumulator
     // CombatAiTickAccumMs in BotSessionEntry, analog IdleTickAccumMs/PatrolCyclesRemaining). Schliesst

@@ -2551,8 +2551,9 @@ namespace
     // dieser Runde (Icy-Veins-/Wowhead-/guiaswow.com-abgeleitete 7.2/7.3.5-Guides, mehrfach
     // gegengeprueft), AUSSCHLIESSLICH auf Patch 7.3.5 eingegrenzt (explizit NICHT BfA/Shadowlands/
     // aktuelles Retail, da sich Faehigkeiten seither mehrfach grundlegend geaendert haben). Die
-    // Recherche selbst nennt fuer jede der vier hier gewaehlten Skillungen "hoch"/"mittel-hoch"
-    // Konfidenz auf Namen/Reihenfolge. NUMERISCHE Spell-IDs waren dagegen in KEINER Quelle dieser
+    // Recherche selbst nennt je Skillung eine Konfidenzeinschaetzung ("hoch"/"mittel-hoch"/"mittel"/
+    // "niedrig") auf Namen/Reihenfolge - siehe Kommentar bei jedem einzelnen Tabelleneintrag unten.
+    // NUMERISCHE Spell-IDs waren dagegen in KEINER Quelle dieser
     // Runde zuverlaessig zu bestaetigen (Netzwerkzugriff auf Wowhead/Icy-Veins/web.archive.org war in
     // der Recherche-Sandbox blockiert) - deshalb enthaelt diese Tabelle bewusst KEINE IDs, sondern nur
     // die recherchierten Namen; ResolveSpellIdByName() (siehe dort) loest sie beim ersten Gebrauch
@@ -2560,10 +2561,25 @@ namespace
     // fuer GENAU diesen Build (26972) garantiert korrekt ist - kein Raten, kein Uebernehmen einer
     // moeglicherweise falschen/veralteten ID aus einer anderen Patch-Version.
     //
-    // Nur VIER Skillungen (je eine pro Rollen-Archetyp) in dieser ersten Runde - siehe
-    // BotMgr.h-Kopfkommentar bei ProcessBotCombatAI() fuer die Begruendung und den PR-Bericht fuer die
-    // Roadmap-Tabelle der restlichen 32 Skillungen (Framework ist fertig, es fehlen nur weitere
-    // Eintraege in dieser Tabelle - kein weiterer Code-Umbau noetig).
+    // Runde 2 (diese Runde): von 4 auf 29 von 36 Skillungen erweitert - reine Dateneingabe nach
+    // demselben Framework, kein Code-Umbau noetig (siehe PR-Bericht). Bewusst NICHT aufgenommen, mit
+    // Begruendung (Mechanik passt nicht in das aktuelle Bedingungs-Vokabular Always/
+    // TargetHealthPctBelow/SelfHealthPctBelow/ResourceAtLeast/Aura(Missing|Present)On(Self|Target),
+    // siehe BotMgr.h):
+    //   - Priest Discipline (256): Atonement-Mechanik heilt ueber Schaden an EINEM Ziel (Smite/Holy
+    //     Fire) waehrend das eigentliche Heilziel ein ANDERES Ziel ist (Atonement-Traeger) - das
+    //     Framework kennt aktuell nur EIN Ziel pro Tick-Entscheidung.
+    //   - Monk Brewmaster (268): Stagger-Schweregrad (leicht/mittel/schwer) ist keine einfache
+    //     Aura-Anwesenheit, sondern ein Stack-/Prozentwert - braucht einen neuen Bedingungstyp.
+    //   - Monk Windwalker (269): Fists-of-Fury->Rising-Sun-Kick->Whirling-Dragon-Punch-Combo braucht
+    //     Reihenfolge-/Timing-Gedaechtnis ueber mehrere Ticks hinweg, keine reine Prioritaetsliste.
+    //   - Warlock Demonology (266): laut Recherche selbst als NIEDRIGE Konfidenz markiert (mehrfache
+    //     grundlegende Neugestaltung waehrend Legion, keine 7.3.5-datierte Quelle verifizierbar).
+    //   - Shaman Enhancement (263), Druid Feral (103), Druid Guardian (104): in dieser
+    //     Recherche-Runde nicht abgedeckt (siehe Aufgabenverteilung der drei Recherche-Agents).
+    // Rogue Outlaw (260) IST enthalten, aber mit einer bewusst vereinfachten "Roll the Bones nur
+    // erneuern, wenn abgelaufen"-Regel statt der eigentlichen (in der Recherche selbst als umstritten/
+    // patchabhaengig markierten) Wuerfel-Qualitaetsbewertung - siehe Kommentar dort.
     std::vector<BotSpecRotation> g_BotSpecRotations =
     {
         // --- Protection Warrior (specId 73) - Tank ---------------------------------------------
@@ -2622,6 +2638,307 @@ namespace
                 { "Riptide",       BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Riptide" },
                 { "Chain Heal",    BotRotationCondition::TargetHealthPctBelow, 80.0f },
                 { "Healing Wave",  BotRotationCondition::Always }
+            }
+        },
+
+        // ==================== Runde 2: 25 weitere Skillungen (siehe Kopfkommentar oben) ====================
+
+        // --- Warrior Arms (specId 71) - Nahkampf-DPS --- MITTEL: Colossus-Smash-Fenster-Feinsteuerung
+        // (Mortal Strike bevorzugt WAEHREND des Fensters) ist hier NICHT modelliert - Colossus Smash und
+        // Mortal Strike laufen beide einfach "on cooldown", was strukturell korrekt aber nicht
+        // burst-optimal ist (dokumentierte Vereinfachung).
+        {
+            71, SPELLFAMILY_WARRIOR, BotRole::MeleeDps,
+            {
+                { "Colossus Smash", BotRotationCondition::Always },
+                { "Mortal Strike",  BotRotationCondition::Always },
+                { "Execute",        BotRotationCondition::TargetHealthPctBelow, 20.0f },
+                { "Overpower",      BotRotationCondition::Always },
+                { "Slam",           BotRotationCondition::Always }
+            }
+        },
+        // --- Paladin Protection (specId 66) - Tank --- HOCH auf "Shield of the Righteous halten"-
+        // Kernidentitaet, MITTEL auf Avenger's-Shield-vs-Judgment-Feinreihenfolge.
+        {
+            66, SPELLFAMILY_PALADIN, BotRole::Tank,
+            {
+                { "Shield of the Righteous", BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Shield of the Righteous" },
+                { "Judgment",                BotRotationCondition::Always },
+                { "Avenger's Shield",        BotRotationCondition::Always },
+                { "Consecration",            BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Consecration" },
+                { "Hammer of the Righteous", BotRotationCondition::Always }
+            }
+        },
+        // --- Paladin Retribution (specId 70) - Nahkampf-DPS --- MITTEL-HOCH: Judgment-Fenster-
+        // Mechanik (Templar's Verdict bevorzugt waehrend des Judgment-Debuffs) recherchiert, hier
+        // vereinfacht als reine Holy-Power-Schwelle statt Debuff-Timing-Praezision.
+        {
+            70, SPELLFAMILY_PALADIN, BotRole::MeleeDps,
+            {
+                { "Judgment",         BotRotationCondition::Always },
+                { "Templar's Verdict", BotRotationCondition::ResourceAtLeast, 3.0f, POWER_HOLY_POWER },
+                { "Blade of Justice", BotRotationCondition::Always },
+                { "Crusader Strike",  BotRotationCondition::Always }
+            }
+        },
+        // --- Paladin Holy (specId 65) - Heiler --- HOCH: Beacon-of-Light/Holy-Shock-Kernidentitaet.
+        // Light of Dawn (AoE-Holy-Power-Spender) bewusst weggelassen - Framework hat aktuell kein
+        // AoE-Heilziel-Modell (siehe BotMgr.h SelectBotHealTarget(), waehlt IMMER genau EIN Ziel).
+        {
+            65, SPELLFAMILY_PALADIN, BotRole::Healer,
+            {
+                { "Beacon of Light", BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Beacon of Light" },
+                { "Holy Shock",      BotRotationCondition::Always },
+                { "Flash of Light",  BotRotationCondition::TargetHealthPctBelow, 50.0f },
+                { "Holy Light",      BotRotationCondition::Always }
+            }
+        },
+        // --- Death Knight Blood (specId 250) - Tank --- MITTEL: Death-Strike/Bone-Shield-Kernloop
+        // korrekt, aber exakte Bone-Shield-Stack-Schwelle/Rune-Kosten laut Recherche selbst nicht
+        // patchgenau bestaetigt - hier vereinfacht als reine Aura-Anwesenheit statt Stack-Zaehler.
+        {
+            250, SPELLFAMILY_DEATHKNIGHT, BotRole::Tank,
+            {
+                { "Marrowrend",  BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Bone Shield" },
+                { "Death Strike", BotRotationCondition::ResourceAtLeast, 45.0f, POWER_RUNIC_POWER },
+                { "Heart Strike", BotRotationCondition::Always }
+            }
+        },
+        // --- Death Knight Frost (specId 251) - Nahkampf-DPS --- MITTEL-HOCH, inkl. 7.3.5-spezifischem
+        // Disintegration-Talent-Detail (Killing-Machine-Verlaengerung durch Frost Strike/Howling
+        // Blast). 2H-Build angenommen (laut Recherche in Spaet-Legion der dominante/haeufigere Build).
+        {
+            251, SPELLFAMILY_DEATHKNIGHT, BotRole::MeleeDps,
+            {
+                { "Obliterate",   BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Killing Machine" },
+                { "Frost Strike", BotRotationCondition::ResourceAtLeast, 60.0f, POWER_RUNIC_POWER },
+                { "Howling Blast", BotRotationCondition::Always },
+                { "Remorseless Winter", BotRotationCondition::Always }
+            }
+        },
+        // --- Death Knight Unholy (specId 252) - Nahkampf-DPS --- MITTEL-HOCH (Festering-Wound-
+        // Builder/Popper-Loop und die genannten Talente sind gut belegt). Apocalypse (Wound-Stack-
+        // gated) bewusst weggelassen - braucht Stack-Zaehler, den das Framework noch nicht kennt.
+        {
+            252, SPELLFAMILY_DEATHKNIGHT, BotRole::MeleeDps,
+            {
+                { "Festering Strike", BotRotationCondition::Always },
+                { "Scourge Strike",   BotRotationCondition::Always },
+                { "Death Coil",       BotRotationCondition::ResourceAtLeast, 60.0f, POWER_RUNIC_POWER },
+                { "Outbreak",         BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Virulent Plague" }
+            }
+        },
+        // --- Rogue Assassination (specId 259) - Nahkampf-DPS --- MITTEL-HOCH, explizit als 7.3.5-
+        // Quelle bestaetigt (guiaswow.com "Patch 7.3.5"-Seite).
+        {
+            259, SPELLFAMILY_ROGUE, BotRole::MeleeDps,
+            {
+                { "Garrote",  BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Garrote" },
+                { "Rupture",  BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Rupture" },
+                { "Envenom",  BotRotationCondition::ResourceAtLeast, 4.0f, POWER_COMBO_POINTS },
+                { "Mutilate", BotRotationCondition::Always }
+            }
+        },
+        // --- Rogue Outlaw (specId 260) - Nahkampf-DPS --- MITTEL: Roll-the-Bones-"Reroll wenn
+        // schlechte Wuerfe"-Feinlogik ist laut Recherche selbst patchabhaengig/umstritten und deshalb
+        // NICHT modelliert - hier bewusst vereinfacht auf "erneuere nur, wenn der Buff komplett
+        // abgelaufen ist" (AuraMissingOnSelf), niemals eine aktive Buff-Kombination verwerfen.
+        {
+            260, SPELLFAMILY_ROGUE, BotRole::MeleeDps,
+            {
+                { "Roll the Bones",  BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Roll the Bones" },
+                { "Between the Eyes", BotRotationCondition::ResourceAtLeast, 5.0f, POWER_COMBO_POINTS },
+                { "Saber Slash",     BotRotationCondition::Always }
+            }
+        },
+        // --- Rogue Subtlety (specId 261) - Nahkampf-DPS --- MITTEL-HOCH inkl. konkretem Opener aus der
+        // Recherche (hier nur die Kernschleife, kein separater Opener-Zustand).
+        {
+            261, SPELLFAMILY_ROGUE, BotRole::MeleeDps,
+            {
+                { "Symbols of Death", BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Symbols of Death" },
+                { "Nightblade",       BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Nightblade" },
+                { "Eviscerate",       BotRotationCondition::ResourceAtLeast, 5.0f, POWER_COMBO_POINTS },
+                { "Backstab",         BotRotationCondition::Always }
+            }
+        },
+        // --- Demon Hunter Havoc (specId 577) - Nahkampf-DPS --- MITTEL-HOCH. Momentum-Build (Fel Rush
+        // offensiv fuer den Buff nutzen) bewusst weggelassen - talentabhaengige Sonderlogik.
+        {
+            577, SPELLFAMILY_DEMON_HUNTER, BotRole::MeleeDps,
+            {
+                { "Chaos Strike", BotRotationCondition::Always },
+                { "Blade Dance",  BotRotationCondition::Always },
+                { "Eye Beam",     BotRotationCondition::Always },
+                { "Demon's Bite", BotRotationCondition::Always }
+            }
+        },
+        // --- Demon Hunter Vengeance (specId 581) - Tank --- MITTEL: Soul-Fragment-Zaehler (steuert
+        // Soul-Cleave-vs-Spirit-Bomb-Wahl) nicht modelliert - hier fest auf den Soul-Cleave-Build
+        // vereinfacht (laut Recherche der "sicherere"/einfachere der beiden Spaet-Legion-Builds).
+        {
+            581, SPELLFAMILY_DEMON_HUNTER, BotRole::Tank,
+            {
+                { "Immolation Aura", BotRotationCondition::Always },
+                { "Demon Spikes",    BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Demon Spikes" },
+                { "Sigil of Flame",  BotRotationCondition::Always },
+                { "Soul Cleave",     BotRotationCondition::Always }
+            }
+        },
+        // --- Mage Arcane (specId 62) - Fernkampf/Zauber-DPS --- HOCH: Arcane-Charges sind in diesem
+        // Core als echte Ressource (POWER_ARCANE_CHARGES) implementiert, passt direkt ins
+        // ResourceAtLeast-Modell. Burn/Evocation-Manazyklus (Rune of Power) bewusst weggelassen -
+        // braucht eigenen Ressourcen-Pooling-Zustand ueber mehrere Ticks.
+        {
+            62, SPELLFAMILY_MAGE, BotRole::RangedDps,
+            {
+                { "Arcane Missiles", BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Clearcasting" },
+                { "Arcane Barrage",  BotRotationCondition::ResourceAtLeast, 4.0f, POWER_ARCANE_CHARGES },
+                { "Arcane Blast",    BotRotationCondition::Always }
+            }
+        },
+        // --- Mage Fire (specId 63) - Fernkampf/Zauber-DPS --- HOCH auf die Hot-Streak/Heating-Up-
+        // Proc-Kernschleife. Combustion-Cooldown-Timing (auf Hot Streak warten, dann pop) bewusst
+        // weggelassen - Cooldown selbst ist in dieser Tabelle nicht enthalten, kann spaeter als
+        // zusaetzlicher Schritt (Always, hohe Prioritaet) ergaenzt werden.
+        {
+            63, SPELLFAMILY_MAGE, BotRole::RangedDps,
+            {
+                { "Pyroblast",       BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Hot Streak" },
+                { "Fire Blast",      BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Heating Up" },
+                { "Phoenix's Flames", BotRotationCondition::Always },
+                { "Fireball",        BotRotationCondition::Always }
+            }
+        },
+        // --- Warlock Affliction (specId 265) - Fernkampf/Zauber-DPS --- HOCH auf die
+        // Agony/Corruption/Unstable-Affliction-Dauerpflege-Identitaet.
+        {
+            265, SPELLFAMILY_WARLOCK, BotRole::RangedDps,
+            {
+                { "Agony",               BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Agony" },
+                { "Corruption",          BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Corruption" },
+                { "Unstable Affliction", BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Unstable Affliction" },
+                { "Drain Soul",          BotRotationCondition::Always }
+            }
+        },
+        // --- Warlock Destruction (specId 267) - Fernkampf/Zauber-DPS --- HOCH: Immolate-Dauerpflege +
+        // Conflagrate-fuer-Shards + Chaos-Bolt-als-Spender ist laut Recherche ueber 7.2/7.3.5 stabil.
+        {
+            267, SPELLFAMILY_WARLOCK, BotRole::RangedDps,
+            {
+                { "Immolate",    BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Immolate" },
+                { "Conflagrate", BotRotationCondition::Always },
+                { "Chaos Bolt",  BotRotationCondition::ResourceAtLeast, 2.0f, POWER_SOUL_SHARDS },
+                { "Incinerate",  BotRotationCondition::Always }
+            }
+        },
+        // --- Priest Shadow (specId 258) - Fernkampf/Zauber-DPS --- HOCH auf SW:P/VT-Dauerpflege und
+        // die Void-Eruption/Voidform-Kernmechanik. Voidform-Eintrittsschwelle als ResourceAtLeast(90)
+        // angenaehert (Recherche nennt 65-90 talentabhaengig) - bewusst der hoehere/sicherere Wert.
+        {
+            258, SPELLFAMILY_PRIEST, BotRole::RangedDps,
+            {
+                { "Void Eruption",     BotRotationCondition::ResourceAtLeast, 90.0f, POWER_INSANITY },
+                { "Void Bolt",         BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Voidform" },
+                { "Shadow Word: Pain", BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Shadow Word: Pain" },
+                { "Vampiric Touch",    BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Vampiric Touch" },
+                { "Mind Blast",        BotRotationCondition::Always },
+                { "Mind Flay",         BotRotationCondition::Always }
+            }
+        },
+        // --- Priest Holy (specId 257) - Heiler --- HOCH auf Heal/Flash-Heal-Fuellschlag +
+        // Renew-Dauerpflege. Holy-Word-Serenity-Freicast-Proc (alle ~4 Casts) nicht modelliert -
+        // braucht einen Cast-Zaehler-Zustand, den das Framework noch nicht kennt.
+        {
+            257, SPELLFAMILY_PRIEST, BotRole::Healer,
+            {
+                { "Flash Heal", BotRotationCondition::TargetHealthPctBelow, 40.0f },
+                { "Renew",      BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Renew" },
+                { "Heal",       BotRotationCondition::Always }
+            }
+        },
+        // --- Shaman Elemental (specId 262) - Fernkampf/Zauber-DPS --- HOCH auf Flame-Shock/Lava-Burst/
+        // Maelstrom-Kernschleife (direkt analog zu Immolate/Destruction oben).
+        {
+            262, SPELLFAMILY_SHAMAN, BotRole::RangedDps,
+            {
+                { "Lava Burst",    BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Lava Surge" },
+                { "Earth Shock",   BotRotationCondition::ResourceAtLeast, 60.0f, POWER_MAELSTROM },
+                { "Flame Shock",   BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Flame Shock" },
+                { "Lightning Bolt", BotRotationCondition::Always }
+            }
+        },
+        // --- Druid Balance (specId 102) - Fernkampf/Zauber-DPS --- HOCH auf Moonfire/Sunfire-
+        // Dauerpflege. Astral Power ist in diesem Core ueber POWER_LUNAR_POWER hinterlegt (historischer
+        // interner Name, siehe SharedDefines.h). Eclipse-Builder-Wechsel (Wrath/Starfire je nach
+        // Sonne/Mond-Zustand) nicht modelliert - Wrath wird hier immer als Fuellschlag genutzt.
+        {
+            102, SPELLFAMILY_DRUID, BotRole::RangedDps,
+            {
+                { "Starsurge", BotRotationCondition::ResourceAtLeast, 50.0f, POWER_LUNAR_POWER },
+                { "Moonfire",  BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Moonfire" },
+                { "Sunfire",   BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Sunfire" },
+                { "Wrath",     BotRotationCondition::Always }
+            }
+        },
+        // --- Druid Restoration (specId 105) - Heiler --- HOCH auf die HoT-Weaving-Kernidentitaet
+        // (Rejuvenation-Dauerpflege + Regrowth-Fuellheilung). Lifebloom (normalerweise fest auf dem
+        // Tank statt dem Niedrigst-Leben-Ziel gehalten) bewusst weggelassen - passt nicht zum
+        // "Heilziel = niedrigstes Leben"-Modell von SelectBotHealTarget().
+        {
+            105, SPELLFAMILY_DRUID, BotRole::Healer,
+            {
+                { "Rejuvenation", BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Rejuvenation" },
+                { "Regrowth",     BotRotationCondition::TargetHealthPctBelow, 50.0f },
+                { "Wild Growth",  BotRotationCondition::TargetHealthPctBelow, 80.0f }
+            }
+        },
+        // --- Monk Mistweaver (specId 270) - Heiler --- HOCH auf Renewing-Mist/Vivify/Enveloping-Mist-
+        // Kernidentitaet. Soothing-Mist-Channel-Interaktion (erlaubt Bewegung waehrend andere Zauber
+        // gecastet werden) nicht modelliert - fuer einen Bot ohnehin irrelevant (kein Movement-Zwang).
+        {
+            270, SPELLFAMILY_MONK, BotRole::Healer,
+            {
+                { "Renewing Mist",  BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Renewing Mist" },
+                { "Enveloping Mist", BotRotationCondition::TargetHealthPctBelow, 50.0f },
+                { "Vivify",         BotRotationCondition::Always }
+            }
+        },
+        // --- Hunter Beast Mastery (specId 253) - Fernkampf-DPS --- MITTEL-HOCH auf Kill-Command/
+        // Barbed-Shot/Bestial-Wrath-Kernschleife. Frenzy-Stack-Pflege auf dem PET (nicht dem Bot
+        // selbst) nicht modelliert - AuraPresentOnSelf/AuraMissingOnSelf koennen nur Bot-eigene Auren
+        // pruefen, keine Pet-Auren (Framework-Grenze, dokumentiert).
+        {
+            253, SPELLFAMILY_HUNTER, BotRole::RangedDps,
+            {
+                { "Kill Command", BotRotationCondition::Always },
+                { "Barbed Shot",  BotRotationCondition::Always },
+                { "Bestial Wrath", BotRotationCondition::Always },
+                { "Cobra Shot",   BotRotationCondition::Always }
+            }
+        },
+        // --- Hunter Marksmanship (specId 254) - Fernkampf-DPS --- MITTEL: "Vulnerable"-Debuff-Synergie
+        // (Aimed Shot/Marked Shot bevorzugt WAEHREND Vulnerable aktiv ist) nicht modelliert - beide
+        // Schuesse sind unabhaengig von Vulnerable castbar, hier bewusst auf eine simple 2-Schritt-
+        // Prioritaet reduziert statt eine falsche Bedingung zu erfinden.
+        {
+            254, SPELLFAMILY_HUNTER, BotRole::RangedDps,
+            {
+                { "Aimed Shot",  BotRotationCondition::Always },
+                { "Arcane Shot", BotRotationCondition::Always }
+            }
+        },
+        // --- Hunter Survival (specId 255) - Nahkampf-DPS --- MITTEL. WICHTIG: in Legion ist Survival
+        // eine NAHKAMPF-Skillung (Wildfire Bomb/Raptor Strike/Mongoose Bite) - komplett anders als in
+        // jedem anderen Patch (Classic-BfA-Fernkampf bzw. Shadowlands+-Rework). Mongoose-Bite-Stack-
+        // Fenster (mehrfach hintereinander casten waehrend Mongoose-Fury aktiv ist) nicht modelliert -
+        // Raptor Strike als sichererer, stack-unabhaengiger Standard-Finisher gewaehlt.
+        {
+            255, SPELLFAMILY_HUNTER, BotRole::MeleeDps,
+            {
+                { "Wildfire Bomb",  BotRotationCondition::Always },
+                { "Serpent Sting",  BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Serpent Sting" },
+                { "Raptor Strike",  BotRotationCondition::Always }
             }
         }
     };
