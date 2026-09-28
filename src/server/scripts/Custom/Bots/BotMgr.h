@@ -236,6 +236,19 @@ enum class BotRotationCondition : uint8
     AuraMissingOnTarget      // Aura (ConditionAuxSpellName, z.B. DoT/HoT) NICHT aktiv auf dem Ziel
 };
 
+// Runde 3: fuer Skillungen, deren Kernmechanik ZWEI verschiedene Ziele pro Rotation braucht (bisher
+// nur Discipline Priest - Atonement heilt ueber Schaden an einem GEGNER, waehrend das eigentliche
+// Heilziel ein VERBUENDETER mit Atonement-Buff ist). Ohne dieses Feld waere das Ziel starr an die
+// Rolle gekoppelt (Heiler->immer Verbuendeter, DPS/Tank->immer Gegner), was fuer Disc strukturell
+// falsch ist. RoleDefault (Standard, alle bisherigen 29 Skillungen nutzen implizit nur diesen Wert)
+// aendert nichts am bestehenden Verhalten.
+enum class BotRotationTargetOverride : uint8
+{
+    RoleDefault,     // wie bisher: Heiler-Rolle -> SelectBotHealTarget(), sonst -> SelectBotCombatTarget()
+    ForceEnemy,      // IMMER der aktuelle Kampf-Gegner, unabhaengig von der Rolle der Skillung
+    ForceHealTarget  // IMMER das per SelectBotHealTarget() gewaehlte Gruppenmitglied
+};
+
 // Ein einzelner Prioritaetseintrag. SpellName ist die recherchierte, patch-7.3.5-genaue Bezeichnung -
 // die einzige "Wahrheitsquelle" in diesem Modul; ResolvedSpellId/ResolvedAuxSpellId werden EINMALIG
 // pro Prozesslauf von BotMgr::GetOrResolveSpecRotation() befuellt (siehe dort) und sind bewusst
@@ -248,6 +261,7 @@ struct BotRotationStep
     float ConditionValue = 0.0f;
     uint32 ConditionAuxPower = 0;                  // nur fuer ResourceAtLeast (Powers-Enum-Wert)
     char const* ConditionAuxSpellName = nullptr;    // nur fuer die drei Aura*-Bedingungen
+    BotRotationTargetOverride TargetOverride = BotRotationTargetOverride::RoleDefault;
     mutable uint32 ResolvedSpellId = 0;
     mutable uint32 ResolvedAuxSpellId = 0;
 };

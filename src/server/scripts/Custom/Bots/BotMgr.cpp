@@ -2940,6 +2940,84 @@ namespace
                 { "Serpent Sting",  BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Serpent Sting" },
                 { "Raptor Strike",  BotRotationCondition::Always }
             }
+        },
+
+        // ==================== Runde 3: die 4 zuvor mit Begruendung ausgelassenen Skillungen, jetzt ====
+        // ==================== per Framework-Erweiterung (TargetOverride) bzw. Mehrfach-Schritten ======
+        // ==================== geloest - siehe BotMgr.h "BotRotationTargetOverride"-Kommentar. =========
+
+        // --- Priest Discipline (specId 256) - Heiler --- HOCH auf die Atonement/Barrier/Rapture-
+        // Beziehung. Loest das urspruengliche Problem "Atonement heilt ueber Schaden an einem ANDEREN
+        // Ziel als dem Heilziel" ueber TargetOverride: Power Word: Shield/Shadow Mend gehen an das per
+        // ForceHealTarget erzwungene Heilziel (traegt danach Atonement), Smite geht an ForceEnemy (den
+        // aktuellen Kampf-Gegner) und heilt darueber alle Atonement-Traeger als Nebeneffekt der
+        // Blizzard-eigenen Spell-Effekt-Logik - kein Zusatzcode in BotMgr fuer den Heilungs-Nebeneffekt
+        // noetig, das macht der Core-Spelleffekt von Smite/Holy Fire bereits selbst. Rapture/Power Word:
+        // Barrier (AoE-Cooldowns) bewusst weggelassen - kein AoE-Ziel-Modell vorhanden (siehe Holy
+        // Paladin/Light of Dawn-Kommentar oben).
+        {
+            256, SPELLFAMILY_PRIEST, BotRole::Healer,
+            {
+                { "Power Word: Shield", BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Atonement",
+                    BotRotationTargetOverride::ForceHealTarget },
+                { "Shadow Mend",        BotRotationCondition::TargetHealthPctBelow, 30.0f, 0, nullptr,
+                    BotRotationTargetOverride::ForceHealTarget },
+                { "Smite",              BotRotationCondition::Always, 0.0f, 0, nullptr,
+                    BotRotationTargetOverride::ForceEnemy }
+            }
+        },
+        // --- Monk Brewmaster (specId 268) - Tank --- HOCH auf die Stagger/Ironskin-Brew/Purifying-
+        // Brew-Ladungs-Mechanik als KONZEPT, MITTEL auf die konkrete Umsetzung hier: die echte Client-
+        // Mechanik kennt abgestufte Stagger-Schweregrade (leicht/mittel/schwer) als eigene, interne
+        // Auren ("Light/Moderate/Heavy Stagger") - werden hier als zwei AuraPresentOnSelf-Schritte
+        // (Heavy zuerst, dann Moderate als Rueckfall) angenommen. NICHT unabhaengig bestaetigt, dass
+        // diese Aura-NAMEN exakt so in diesem Server-Build 26972 vorliegen - ResolveSpellIdByName()
+        // schlaegt sauber fehl (TC_LOG_ERROR, Schritt bleibt inaktiv) statt falsch zu casten, falls
+        // nicht; mit '.lookup spell stagger' pruefen und ggf. den Namen hier anpassen.
+        {
+            268, SPELLFAMILY_MONK, BotRole::Tank,
+            {
+                { "Purifying Brew", BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Heavy Stagger" },
+                { "Purifying Brew", BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Moderate Stagger" },
+                { "Ironskin Brew",  BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Ironskin Brew" },
+                { "Keg Smash",      BotRotationCondition::Always },
+                { "Blackout Strike", BotRotationCondition::Always },
+                { "Tiger Palm",     BotRotationCondition::Always }
+            }
+        },
+        // --- Monk Windwalker (specId 269) - Nahkampf-DPS --- MITTEL-HOCH auf die Namen/Grundreihenfolge
+        // (Fists of Fury vor Rising Sun Kick vor Whirling Dragon Punch), NIEDRIG auf die exakte Combo-
+        // Timing-Voraussetzung: Whirling Dragon Punch verlangt laut Recherche, dass BEIDE anderen
+        // Faehigkeiten kuerzlich benutzt wurden - dieses Framework hat aktuell kein Mehr-Tick-
+        // Sequenz-Gedaechtnis (siehe BotMgr.h-Roadmap-Kommentar), deshalb steht der Schritt hier als
+        // einfaches "Always" in Prioritaetsreihenfolge. Ist die Combo-Voraussetzung nicht erfuellt,
+        // scheitert Spell::CheckCast() intern (Core-eigene Validierung, KEIN Absturz) - der Bot
+        // verschwendet in diesem Fall einen Tick-Versuch, bevor die naechste Prioritaet (Tiger Palm)
+        // beim naechsten Kampf-KI-Tick zum Zug kommt. Touch of Death/Serenity/Storm-Earth-and-Fire
+        // bewusst weggelassen (Execute-Schwelle bzw. talentabhaengige Cooldowns).
+        {
+            269, SPELLFAMILY_MONK, BotRole::MeleeDps,
+            {
+                { "Fists of Fury",        BotRotationCondition::Always },
+                { "Rising Sun Kick",      BotRotationCondition::Always },
+                { "Whirling Dragon Punch", BotRotationCondition::Always },
+                { "Tiger Palm",           BotRotationCondition::Always }
+            }
+        },
+        // --- Warlock Demonology (specId 266) - Fernkampf/Zauber-DPS --- NIEDRIG (von der urspruenglichen
+        // Recherche selbst so markiert: Demonology wurde waehrend Legion mehrfach grundlegend
+        // umgestaltet, keine 7.3.5-datierte Primaerquelle in der Recherche-Sandbox verifizierbar - vor
+        // Live-Einsatz dringend gegen eine 7.3.5-spezifische Quelle/SimC-APL nachpruefen, mehr als bei
+        // jeder anderen Tabellenzeile in dieser Datei).
+        {
+            266, SPELLFAMILY_WARLOCK, BotRole::RangedDps,
+            {
+                { "Doom",               BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Doom" },
+                { "Call Dreadstalkers", BotRotationCondition::Always },
+                { "Hand of Gul'dan",    BotRotationCondition::ResourceAtLeast, 4.0f, POWER_SOUL_SHARDS },
+                { "Demonbolt",          BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Demonic Core" },
+                { "Shadow Bolt",        BotRotationCondition::Always }
+            }
         }
     };
 }
@@ -3161,14 +3239,30 @@ void BotMgr::ProcessBotCombatAI(uint32 accountId, uint32 diff)
     if (!rotation)
         return; // Skillung noch nicht verdrahtet - siehe Kopfkommentar bei g_BotSpecRotations
 
-    Unit* target = rotation->Role == BotRole::Healer ? SelectBotHealTarget(player) : SelectBotCombatTarget(player);
-    if (!target)
-        return;
+    // Runde 3: BEIDE moeglichen Ziele im Voraus ermitteln (billig - jeweils nur eine Gruppen-Iteration/
+    // ein GetVictim()-Zugriff), damit einzelne Schritte per TargetOverride unabhaengig von der
+    // Skillungs-Rolle ein Gegner- oder Heilziel erzwingen koennen (siehe BotRotationTargetOverride-
+    // Kommentar in BotMgr.h, noetig fuer Discipline Priest's Atonement-Mechanik).
+    Unit* combatTarget = SelectBotCombatTarget(player);
+    Unit* healTarget = SelectBotHealTarget(player);
+    Unit* roleDefaultTarget = rotation->Role == BotRole::Healer ? healTarget : combatTarget;
+
+    if (!combatTarget && !healTarget)
+        return; // weder ein Kampfziel noch ein Heilbedarf - fuer diese Skillung aktuell nichts zu tun
 
     for (BotRotationStep const& step : rotation->Priority)
     {
         if (!step.ResolvedSpellId)
             continue; // Namensaufloesung ist fehlgeschlagen (siehe ResolveSpellIdByName()-Fehlerlog)
+
+        Unit* target = roleDefaultTarget;
+        if (step.TargetOverride == BotRotationTargetOverride::ForceEnemy)
+            target = combatTarget;
+        else if (step.TargetOverride == BotRotationTargetOverride::ForceHealTarget)
+            target = healTarget;
+
+        if (!target)
+            continue;
 
         SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(step.ResolvedSpellId);
         if (!spellInfo || !player->HasSpell(step.ResolvedSpellId))
