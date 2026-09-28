@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2017-2018 AshamaneProject <https://github.com/AshamaneProject>
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
@@ -409,7 +409,7 @@ public:
             Unit* caster = GetCaster();
 
             // Doom Wolves (198505, Doomhammer trait): the client stores the replacement summon in the trait itself
-            // (E0 BasePoints 198506, MiscValue 51533 = Feral Spirit); the reference core spell_linked_spell does the same swap
+            // (E0 BasePoints 198506, MiscValue 51533 = Feral Spirit); LegionCore spell_linked_spell does the same swap
             // (51533 -> 198506 with 198505, else 228562). 198506 summons two Doom Wolves (100820) at the caster.
             // Legion-Server round LCF2 2026-09-25.
             if (AuraEffect const* doomWolves = caster->GetAuraEffect(198505, EFFECT_0))

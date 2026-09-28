@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -2950,7 +2950,7 @@ void SmartScript::ProcessAction(SmartScriptHolder& e, Unit* unit, uint32 var0, u
         }
         case SMART_ACTION_SEND_SCENARIO_EVENT:
         {
-            // Legion-Server round 50: bridge for the reference core's action type 205, used by the "A Ring Unbroken"
+            // Legion-Server round 50: bridge for LegionCore's action type 205, used by the "A Ring Unbroken"
             // scenario (map 1572) NPCs/eventobjects to advance InstanceScenario steps of type SEND_EVENT_SCENARIO.
             ObjectList* targets = GetTargets(e, unit);
             if (!targets)

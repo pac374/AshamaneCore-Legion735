@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -425,6 +425,316 @@ public:
     uint32 GetBotPatrolCyclesCompleted(uint32 accountId) const;
     uint32 GetBotPatrolCyclesTotal(uint32 accountId) const;
 
+    // --- Runde 93 (28.09.2026): EIN einziger Kartenwechsel-Live-Test ---------
+    //
+    // Voller Vorlauf: lcf2r89 (Code-Review Player::TeleportTo(), Blocker gefunden:
+    // Player::TeleportTo() schliesst einen Kartenwechsel NICHT ab, der eigentliche
+    // Map-Wechsel [CreateMap/Relocate/SetMap/AddPlayerToMap fuer die NEUE Map] passiert
+    // ausschliesslich in WorldSession::HandleMoveWorldportAck(), das normalerweise nur
+    // durch den Client-Ack MSG_MOVE_WORLDPORT_ACK ausgeloest wird) und lcf2r90 (volle
+    // Zeile-fuer-Zeile-Review von HandleMoveWorldportAck(), MovementHandler.cpp:46-231:
+    // kein neuer Absturzpfad, SendPacket() bereits generisch socket-sicher, einziger
+    // Restrisikopunkt sind die beiden Homebind-Fallback-Pfade bei ungueltigem
+    // Teleport-Ziel - vermeidbar durch eine garantiert gueltige, offene
+    // Kontinent-Zielkoordinate ohne Instanz/Dungeon).
+    //
+    // Analog zum bereits produktiven Login-Muster (Runde B/lcf2r64:
+    // HandlePlayerLoginOpcode()+HandleContinuePlayerLogin() manuell statt durch einen
+    // echten zweiten Client-Handshake): ruft player->TeleportTo(mapId, x, y, z, o) auf,
+    // DANACH sofort manuell botSession->HandleMoveWorldportAck() (oeffentlich,
+    // parameterlos, Header-Kommentar "for server-side calls"), um den sonst nie
+    // eintreffenden Client-Ack zu ersetzen. Nur fuer bereits eingeloggte Bots
+    // (STATE_IN_WORLD) sinnvoll - kein automatischer Login-Trigger hier.
+    //
+    // Diagnose-Logging exakt nach lcf2r90-Empfehlung (Punkt 4): TC_LOG_INFO-Marker vor/
+    // nach TeleportTo() und vor/nach HandleMoveWorldportAck(), damit ein Abrutschen in
+    // einen der beiden Homebind-Fallback-Pfade sofort sichtbar ist. Map::AddPlayerToMap()
+    // selbst ist innerhalb von HandleMoveWorldportAck() (anderes Compilation-Unit,
+    // MovementHandler.cpp) gekapselt und liefert BotMgr keinen direkten Rueckgabewert -
+    // als Ersatzindikator wird nach dem Aufruf player->GetMapId() gegen das gewuenschte
+    // Ziel verglichen (weicht die tatsaechliche Map vom Ziel ab, ist das ein starkes
+    // Indiz fuer den Homebind-Fallback-Pfad, nicht fuer einen erfolgreichen Kartenwechsel).
+    bool TeleportBot(uint32 accountId, uint32 mapId, float x, float y, float z, float orientation = 0.0f);
+
+    // --- Runde 122 (28.09.2026): EIN einziger Kampf-Live-Test (Auto-Attack) --------------
+    //
+    // Voller Code-Review-Vorlauf: lcf2r121 (Kopfkommentar-Referenz,
+    // C:\LegionServer\reports\lcf2r121_2026-09-28_playerbots_kampf_loot_codereview.md) - der komplette
+    // Auto-Attack-Callstack (Unit::Attack()/AttackerStateUpdate()/CalculateMeleeDamage()/
+    // SendAttackStateUpdate()/DealMeleeDamage()) hat KEINEN ungeschuetzten GetSession()/m_Socket[]-
+    // Zugriff, alle Sends laufen durch den bereits abgesicherten WorldSession::SendPacket()-Guard.
+    // Bewusst der einfachste Kampf-Fall: reiner Melee-Auto-Attack (player->Attack(target, true)), KEIN
+    // Spell-Cast (der On-Hit-Item-Proc-Pfad CastItemCombatSpell() bleibt fuer diesen ersten Test
+    // aussen vor, siehe lcf2r121 Abschnitt 1.5 - Testbot hat keine Waffe mit On-Hit-Enchant).
+    //
+    // targetGuid ist die DB-Spawn-Id (dieselbe "guid"-Spalte wie in der `creature`-Tabelle, NICHT die
+    // laufzeit-volle ObjectGuid) - exakt dasselbe Muster wie in cs_npc.cpp (z. B. ".npc move"):
+    // sObjectMgr->GetCreatureData(targetGuid) liefert Entry+Map, ObjectGuid::Create<HighGuid::Creature>(...)
+    // baut daraus die volle ObjectGuid, ObjectAccessor::GetCreature(*player, guid) findet das lebende
+    // Objekt (nur wenn aktuell im selben Grid/derselben Map geladen wie der Bot).
+    bool StartBotAttack(uint32 accountId, ObjectGuid::LowType targetGuid);
+
+    // Gegenstueck: bricht den per StartBotAttack() begonnenen Auto-Attack sofort ab
+    // (player->AttackStop()) - fuer den vorgeschriebenen Testablauf "EIN Autoattack-Zyklus, dann
+    // sofort AttackStop()".
+    void StopBotAttack(uint32 accountId);
+
+    // --- Runde 129 (28.09.2026): Testbot-Unverwundbarkeit (NUR fuer '.bottest'-Livetests) ------
+    //
+    // Root-Cause aus Runde 128: ein frischer Level-1/60-HP-Testbot stirbt am Gegenschlag eines
+    // rechnerisch neutralen Ziels, bevor ein voller Kill-Zyklus je erreicht wird (Selbstverteidigung
+    // ist unabhaengig von der Aggro-Reaktion). Gewaehlter Loesungsweg (siehe Bewertung im Bericht
+    // lcf2r129): WEDER ein core-weiter Damage-Bypass in Unit::DealDamage (architektonisch
+    // ausgeschlossen - "scripts" [dieses Modul] linkt GEGEN "game", nicht umgekehrt, ein Include von
+    // BotMgr.h in Unit.cpp waere ein zirkulaerer Modul-Abhaengigkeitsbruch) NOCH UNIT_FLAG_IMMUNE_TO_NPC
+    // (per Unit::_IsValidAttackTarget()-Code-Review, Unit.cpp ~8435-8436, SYMMETRISCH - wuerde auch
+    // den eigenen ausgehenden player->Attack()-Aufruf gegen das Ziel blockieren, unbrauchbar). Stattdessen:
+    // dieselbe bereits im Core existierende, oeffentliche Unit::ApplySpellImmune(spellId, IMMUNITY_DAMAGE,
+    // SPELL_SCHOOL_MASK_ALL, apply)-Route, die auch echte Content-Auren wie Divine Shield nutzen
+    // (SpellInfo.cpp:3544) - Unit::CalculateMeleeDamage() prueft bereits target->IsImmunedToDamage()
+    // (Unit.cpp:1350) VOR jedem Melee-Schadenswert, kein neuer Code im Kern noetig, nur ein bereits
+    // oeffentlicher Aufruf aus BotMgr.cpp heraus. spellId ist ein reiner Platzhalter-Schluessel (keine
+    // echte Spell-ID/kein Aura-Sichtbarkeitseffekt), dient nur dem symmetrischen apply=true/false-Paar
+    // in Unit::ApplySpellImmune() (siehe Unit.cpp:7984-7999, Schluessel-Match ueber (schoolMask, spellId)).
+    // Wirkt NUR eingehenden Schaden - der Bot kann weiterhin normal per StartBotAttack() angreifen und
+    // Schaden austeilen. Ausschliesslich ueber den GM-Befehlspfad ('.bottest invuln') fuer EINEN
+    // konkreten Bot-Account schaltbar, nie automatisch/global, nie fuer echte Spieler erreichbar (kein
+    // Aufrufpfad ausserhalb von BotMgr existiert dafuer). IMMER nach dem Test wieder mit enable=false
+    // aufrufen (sonst bleibt die Immunitaet ueber Logout/Login hinweg am Player-Objekt bestehen, bis
+    // der Prozess neu startet oder der Char neu geladen wird).
+    bool SetBotTestInvulnerable(uint32 accountId, bool enable);
+
+    // --- Runde 129 (28.09.2026): Loot-Implementierung nach Plan aus lcf2r128 Abschnitt 7 ------
+    //
+    // 3-Schritt-Opcode-Nachbau, DIREKT/SYNCHRON ueber die bereits oeffentlichen
+    // WorldSession::Handle*Opcode()-Methoden (siehe LootHandler.cpp fuer die echten Signaturen/
+    // Feldnamen) - exakt dasselbe Direktaufruf-Muster wie StartBotAttack()/TeleportBot() oben, NICHT
+    // ueber QueuePacket()+Update() (fuer unsere socketlosen Bot-Sessions architektonisch ausgeschlossen,
+    // Kopfkommentar-Referenz "Runde A"). targetGuid ist wie bei StartBotAttack() die DB-Spawn-Id aus
+    // der `creature`-Tabelle (Spalte "guid"), NICHT die Laufzeit-ObjectGuid - dieselbe
+    // Map::GetCreatureBySpawnIdStore()-Aufloesung wie in StartBotAttack() wird wiederverwendet, diesmal
+    // aber muss das Ziel BEREITS TOT sein (Gegenstueck zur Lebend-Pruefung in StartBotAttack()).
+    // Ablauf: (1) WorldPackets::Loot::LootUnit{Unit=target->GetGUID()} -> HandleLootOpcode() (fuellt
+    // creature->loot server-seitig via Player::SendLoot()/Loot::FillLoot(), inkl. Gruppen-/Quest-Item-
+    // Regeln - kein Roundtrip-Parsing eines SMSG_LOOT_RESPONSE noetig, wir lesen creature->loot direkt).
+    // (2) fuer jeden loot-berechtigten, noch nicht gelooteten, nicht-Waehrungs-Slot in target->loot.items:
+    // WorldPackets::Loot::LootItem{Loot=[{Object=target->loot.GetGUID(), LootListID=Index+1}, ...]} ->
+    // HandleAutostoreLootItemOpcode() (reicht dieselbe Player::StoreNewItem()-Logik durch wie ein echter
+    // Client). (3) WorldPackets::Loot::LootRelease{Unit=target->GetGUID()} -> HandleLootReleaseOpcode()
+    // (setzt UNIT_DYNFLAG_LOOTABLE zurueck, schliesst den Vorgang sauber ab). Rueckgabewert true, wenn
+    // Schritt (1) angelaufen ist (Item-Anzahl kann 0 sein, z. B. leere Loot-Tabelle - kein Fehler).
+    bool BotLootTarget(uint32 accountId, ObjectGuid::LowType targetGuid);
+
+    // --- Runde 132 (28.09.2026): Tod-Handling (Release/Graveyard/Resurrection Sickness) --------
+    //
+    // Code-Review-Vorlauf (Player.cpp/MiscHandler.cpp/NPCHandler.cpp gegengelesen, kein neuer
+    // Core-Code noetig, dasselbe Direktaufruf-Muster wie BotLootTarget()/StartBotAttack() oben):
+    // Der reguläre Client-Ablauf beim Tod ist NICHT eine einzelne Funktion, sondern drei bereits
+    // oeffentliche WorldSession-/Player-Methoden hintereinander, ausgeloest durch
+    // CMSG_REPOP_REQUEST (WorldSession::HandleRepopRequest(), MiscHandler.cpp:62):
+    //   1. Player::KillPlayer() (Player.cpp:4497) - nur falls getDeathState()==JUST_DIED (Race-
+    //      Fenster zwischen Server-seitigem Tod und Client-Request, siehe HandleRepopRequest()-
+    //      Kommentar) - setzt deathState=CORPSE, startet den 6-Minuten-Reclaim-Timer. Fuer den
+    //      Bot IMMER relevant, da kein Client existiert, der den Opcode "zufaellig" schon vorher
+    //      ausgeloest haette.
+    //   2. Player::BuildPlayerRepop() (Player.cpp:4356) - erzeugt den Geist-Zustand (SetHealth(1),
+    //      Corpse-Objekt an der Todesposition, SPELL_AURA_GHOST) - KEIN Teleport.
+    //   3. Player::RepopAtGraveyard() (Player.cpp:4830) - ermittelt den naechsten Friedhof
+    //      (sObjectMgr->GetClosestGraveYard()) und ruft TeleportTo() dorthin auf; bleibt danach als
+    //      Geist am Friedhof stehen (KEINE automatische volle Wiederbelebung - das macht erst
+    //      Schritt 2 unten, analog zum echten Spirit-Healer-Rechtsklick).
+    // HandleRepopRequest() ruft zusaetzlich RemovePet()/eine Instanz-Eingangs-Resurrection-
+    // Sonderbehandlung auf - bewusst NICHT uebernommen: Bots haben in dieser Kampagne noch keine
+    // Pets, und der Livetest findet wie bei StartBotAttack()/BotLootTarget() ausschliesslich auf
+    // einer offenen Kontinent-Map statt (kein Instanz-Sonderfall moeglich).
+    //
+    // WICHTIG (dasselbe Muster wie TeleportBot(), Runde 93): RepopAtGraveyard() ruft TeleportTo()
+    // INTERN auf. Ist das Ziel eine andere Map, schliesst TeleportTo() den Wechsel NICHT ab (siehe
+    // Runde-93-Kopfkommentar) - der sonst vom Client gesendete MSG_MOVE_WORLDPORT_ACK muss auch
+    // hier durch einen manuellen botSession->HandleMoveWorldportAck()-Aufruf ersetzt werden, FALLS
+    // player->IsBeingTeleportedFar() danach true ist (bleibt der Friedhof auf derselben Map wie der
+    // Todesort, ist das ein No-Op, siehe TeleportBot()-Kommentar).
+    bool HandleBotDeath(uint32 accountId);
+
+    // Gegenstueck zum Spirit-Healer-Rechtsklick (WorldSession::HandleSpiritHealerActivate() ->
+    // SendSpiritResurrect(), NPCHandler.cpp:444/460) - volle Wiederbelebung MIT
+    // Resurrection-Sickness (Player::ResurrectPlayer(0.5f, /*applySickness*/ true)), gefolgt von
+    // DurabilityLossAll(0.25f)/SpawnCorpseBones()/ggf. einem zweiten TeleportTo(), falls der
+    // naechste Friedhof zum Leichnam vom naechsten Friedhof zum Geist abweicht (siehe
+    // SendSpiritResurrect()-Quellcode, NPCHandler.cpp:460-490). SendSpiritResurrect() ist bereits
+    // eine oeffentliche WorldSession-Methode - kein NPC-Interaktionscheck noetig (der reale Check
+    // in HandleSpiritHealerActivate() prueft nur GetNPCIfCanInteractWith(), rein clientseitige
+    // Sichtbarkeits-/Distanzabsicherung, fuer einen synchronen Server-Aufruf ohne echten Client
+    // irrelevant). Nur sinnvoll, wenn der Bot aktuell Geist ist (PLAYER_FLAGS_GHOST) - siehe
+    // Guard in der .cpp. Denselben HandleMoveWorldportAck()-Nachtrag wie HandleBotDeath() oben,
+    // falls der optionale zweite TeleportTo() in SendSpiritResurrect() eine andere Map trifft.
+    bool ReviveBotAtGraveyard(uint32 accountId);
+
+    // --- Runde 133 (28.09.2026): Ausruesten (naechster Roadmap-Schritt nach Kampf/Tod-Handling) ------
+    //
+    // Nutzervorgabe Runde 131 bestaetigt: Loot bleibt gestrichen, "Ausruesten" ist trotzdem ein
+    // EIGENSTAENDIGES Thema (Bots sollen Items anlegen koennen, unabhaengig davon WIE die Items ins
+    // Inventar kommen) - deshalb hier bewusst KEIN Bezug zu BotLootTarget()/Loot::FillLoot().
+    // Code-Review-Vorlauf (ItemHandler.cpp::HandleAutoEquipItemOpcode(), cs_misc.cpp::
+    // HandleAddItemCommand() gegengelesen): beide Ablaeufe sind bereits Ketten oeffentlicher
+    // Player-Methoden, dasselbe Direktaufruf-Muster wie BotLootTarget()/HandleBotDeath() oben.
+    //
+    // Schritt A (Test-Item ins Inventar, GM-Item-Vergabe-Pfad, NICHT Loot): Player::CanStoreNewItem()
+    // + Player::StoreNewItem() - exakt dieselben zwei Aufrufe, die ".additem" (cs_misc.cpp,
+    // HandleAddItemCommand()) intern nutzt. Kein eigener SQL-Insert, keine Umgehung der
+    // Platz-/Stack-Pruefung.
+    // Schritt B (Anlegen): Player::CanEquipItem(NULL_SLOT, dest, item, /*swap*/true) ermittelt den
+    // passenden Ausruestungsslot ueber itemTemplate->InventoryType (dieselbe Logik wie beim echten
+    // Ziehen ins Slot) - danach Player::RemoveItem() (aus dem Rucksackslot) + Player::EquipItem(dest,
+    // item, true) (setzt VisualizeItem()/UpdateItemDependentAuras() intern, kein separater Aufruf
+    // noetig - EquipItem() ruft VisualizeItem() bereits selbst auf).
+    // Schritt C (Bestaetigung): Player::GetItemByPos(dest) + Vergleich Item::GetEntry() gegen die
+    // angeforderte itemEntry.
+    //
+    // BEWUSST NICHT unterstuetzt in dieser Runde: Ziel-Slot bereits belegt (Swap alt<->neu, wie im
+    // "else"-Zweig von HandleAutoEquipItemOpcode() fuer echte Spieler) - Testbots dieser Kampagne
+    // starten ungeruestet (Level 1, leeres Inventar seit Runde 128/129), ein belegter Zielslot ist
+    // fuer den vorgesehenen Testablauf kein erwarteter Fall. Bei belegtem Slot: Funktion bricht mit
+    // Fehler ab, das bereits eingelagerte Test-Item bleibt unangetastet im Rucksack (kein Datenverlust,
+    // kein Teil-Rollback noetig).
+    bool EquipBotItem(uint32 accountId, uint32 itemEntry);
+
+    // --- Runde 135 (28.09.2026): Equipment-Pool-Implementierung nach Design lcf2r134 -------------
+    //
+    // Voller Design-Bericht: C:\LegionServer\reports\lcf2r134_2026-09-28_playerbots_equipment_pool_design.md
+    // Setzt direkt auf EquipBotItem() (Runde 133) auf - dieselbe Item-Einlager-/Anlege-Logik, nur
+    // die AUSWAHL der itemEntry-Werte ist neu. Zwei neue Tabellen (Empfehlung R134 Abschnitt 7,
+    // Option A): `world.bot_equipment_pool` (einmalig per Python-Generierungsskript aus dem lokalen
+    // Client-DB2-CSV-Export item.csv+itemsparse.csv befuellt, siehe Rundenbericht 135) und
+    // `characters.bot_gear_tier` (eine Zeile pro Bot-Charakter, dauerhaft fixe Qualitaetsstufe).
+    //
+    // Ablauf:
+    // 1. GetOrAssignBotGearTier() liest `characters.bot_gear_tier` fuer die aktuelle Bot-GUID; falls
+    //    noch keine Zeile existiert, wird EINMALIG per Pyramiden-Gewichtung (R134 Abschnitt 3.3,
+    //    abhaengig vom Level-Band des Bots ZUM ZEITPUNKT DES WUERFELNS) eine Stufe 1-4 gewuerfelt und
+    //    dauerhaft gespeichert - kein Re-Roll bei spaeteren Aufrufen (Nutzervorgabe "einmalig,
+    //    dauerhaft fix").
+    // 2. Fuer jeden Ausruestungs-Slot wird aus `bot_equipment_pool` (WHERE level_band=aktuelles
+    //    Levelband, pool_quality=gewuerfelte Stufe, item_class/item_subclass/inventory_type passend
+    //    zu Klasse+Level+Slot) zufaellig ein item_entry gezogen - Faellt die gewuerfelte Stufe fuer
+    //    einen Slot leer aus (z. B. "episch" bei Level < 20, siehe R134 3.3), faellt die Auswahl
+    //    Stufe fuer Stufe ab (analog mod-playerbots' Fallback-Schleife, R134 Abschnitt 2.2), bis ein
+    //    Treffer da ist oder Stufe 1 erschoepft ist (dann bleibt der Slot leer, kein Fehler).
+    // 3. Jedes gezogene item_entry wird ueber die BEREITS in Runde 133 live bestaetigte
+    //    EquipBotItem()-Logik tatsaechlich ausgeruestet (StoreNewItem+CanEquipItem+EquipItem) - kein
+    //    neuer Anlege-Code, nur eine neue Auswahlschicht davor.
+    //
+    // Ruestungstyp-/Waffentyp-Filterung exakt nach R134 Abschnitt 5 (Level-40-Schwelle
+    // Krieger/Paladin Kette->Platte, Jaeger/Schamane Leder->Mail; Klassen-Waffentyp-Zuordnung
+    // bewusst vereinfacht auf Klassenebene statt vollem Spec-Proficiency-System, siehe .cpp-
+    // Kommentar bei GetAllowedWeaponSubclasses() - dokumentierte Vereinfachung fuer diese Runde).
+    // Artefaktwaffen sind in `bot_equipment_pool` bereits beim Befuellen ausgeschlossen (ArtifactID
+    // != 0 gefiltert), hier keine zusaetzliche Pruefung noetig.
+    bool EquipBotFromPool(uint32 accountId);
+
+    // --- Runde 137 (28.09.2026): Gruppen-Beitritt + Folgen-KI nach Design lcf2r136 ----------------
+    //
+    // Voller Design-Bericht: C:\LegionServer\reports\lcf2r136_2026-09-28_playerbots_gruppe_lfr_design.md
+    // Code-Review-Vorlauf (Runde 136, Group.h/.cpp + GroupHandler.cpp gegengelesen): der normale
+    // Invite/Accept-Zweischritt (Group::AddInvite()+Client-Antwort) ist fuer einen vom GM direkt
+    // gesteuerten, socketlosen Bot verzichtbar - Group::AddMember(Player*) (Group.cpp, bereits public)
+    // erledigt die komplette Beitritts-State-Aenderung (SetGroup(), DB-Insert characters.group_member,
+    // SendUpdate()/BroadcastGroupUpdate() ueber den bereits mehrfach bestaetigten Null-Socket-sicheren
+    // WorldSession::SendPacket()-Pfad) OHNE Opcode-Parser-Durchlauf - dasselbe Direktaufruf-Muster wie
+    // BotLootTarget()/HandleBotDeath()/EquipBotItem() in den Vorrunden.
+    //
+    // Ablauf (siehe lcf2r136 Abschnitt 4): leader ist der AUSFUEHRENDE GM-Charakter (kein Bot) -
+    // liefert der Aufrufer (bot_commandscript.cpp) automatisch per handler->GetPlayer(). Guard-Kette:
+    // Bot muss STATE_IN_WORLD sein und darf noch in KEINER Gruppe sein (kein Fremdgruppen-Kick, kein
+    // Datenverlust); existiert beim Leader noch keine Gruppe, wird sie per Group::Create()+
+    // GroupMgr::AddGroup() neu angelegt (derselbe einfachere Weg wie im Design-Bericht empfohlen,
+    // KEIN AddLeaderInvite()-Zwischenzustand noetig); existiert bereits eine BG/BF-Raid-Gruppe, wird
+    // stattdessen player->GetOriginalGroup() verwendet (dieselbe Sonderfall-Behandlung wie
+    // HandlePartyInviteResponseOpcode()). Gruppengroesse-Limit (MAX_GROUP_SIZE=5 normale Gruppe,
+    // MAX_RAID_SIZE=40 falls Raid) greift automatisch ueber Group::IsFull()/AddMember()s
+    // Subgroup-Suche - kein Zusatzcode noetig, sauberes Fehlschlagen ohne Mutation bei Ueberfuellung.
+    bool InviteBotToGroup(uint32 botAccountId, Player* leader);
+
+    // Gegenstueck (Design-Bericht Abschnitt 4, "optional .bottest groupleave"): entfernt den Bot
+    // sauber aus seiner aktuellen Gruppe - Player::RemoveFromGroup() ist bereits eine oeffentliche
+    // Player-Methode (dieselbe Symmetrie-Konvention wie LogoutBot()/StopBotAttack() zu den jeweiligen
+    // Start-Methoden dieser Kampagne).
+    bool RemoveBotFromGroup(uint32 botAccountId);
+
+    // --- Runde 137 (28.09.2026): Folgen-KI (MotionMaster::MoveFollow()) ----------------------------
+    //
+    // Blocker-Check aus Runde 136 (lcf2r136 Abschnitt 5): MotionMaster::MoveFollow(Unit* target,
+    // float dist, float angle, MovementSlot slot) ist bereits als oeffentliche Core-API vorhanden
+    // (MotionMaster.h), bisher aber von keiner BotMgr-Runde aufgerufen worden. Nutzt denselben
+    // MoveSplineInit/PathGenerator-Unterbau wie das bereits live bestaetigte
+    // MovePoint(generatePath=true) aus Runde U (lcf2r83) - kontinuierliche Neuberechnung statt
+    // Einmalauslösung, aber KEIN neuer Update-Pfad (MotionMaster::UpdateMotion() laeuft bereits
+    // unconditional pro Map-Tick fuer jeden Player inkl. Bot, seit Runde S/T live bestaetigt).
+    //
+    // dist/angle bewusst analog zur ueblichen Begleiter-/Pet-Nutzung im Core gewaehlt (kleiner
+    // Abstand hinter dem Ziel, keine feste Formation noetig fuer diesen ersten isolierten Test) -
+    // feste Werte in der .cpp dokumentiert, kein Parameter in dieser Runde (bewusst minimal, analog
+    // MoveBotTestStep()). targetGuid ist hier (anders als bei StartBotAttack()/BotLootTarget()) die
+    // VOLLE Laufzeit-ObjectGuid (typischerweise der Gruppenleiter/Spielercharakter, hat keine
+    // DB-Spawn-Id wie eine Creature) - Aufloesung ueber ObjectAccessor::GetUnit(*botPlayer, targetGuid).
+    bool StartBotFollow(uint32 botAccountId, ObjectGuid targetGuid);
+
+    // Notbremse: bricht ein laufendes Follow sofort ab (bot->GetMotionMaster()->Clear() vom aktiven
+    // Follow-Slot, Bot bleibt an der aktuellen Position stehen) - dieselbe Konvention wie
+    // StopBotPatrol()/StopBotAttack() zu ihren jeweiligen Start-Methoden.
+    void StopBotFollow(uint32 botAccountId);
+
+    // --- Runde 143 (28.09.2026): Artefaktwaffen - Zuweisung + Skillung nach Design lcf2r138 Teil B ---
+    //
+    // Voller Design-Bericht: C:\LegionServer\reports\lcf2r138_2026-09-28_playerbots_gruppe_stufe2_lfg_artefakt_design.md
+    // (Abschnitt "Teil B"). Kernbefund von dort: es gibt KEINE separate `character_artifact`-Tabelle -
+    // der Artefaktzustand (Traits/Raenge/Tier) liegt als Item-Dynamic-Field-Daten direkt auf dem
+    // `item_instance`-Datensatz der Waffe. `Item::Create()` (derselbe Pfad wie EquipBotItem()/
+    // `.additem`, seit Runde 133 genutzt) initialisiert bei `ItemTemplate::GetArtifactID()!=0`
+    // automatisch die Tier-0-Traits - EquipBotArtifact() braucht deshalb KEINEN neuen Anlege-Code,
+    // nur die Auswahl der richtigen itemEntry davor (siehe .cpp fuer die 36 Klasse/Spec->Item-
+    // Zuordnung, per lokalem Client-DB2-CSV-Export Artifact_7.3.5.26972.csv + itemsparse.csv
+    // ermittelt und gegen die bekannten 36 Legion-Spezialisierungen verifiziert).
+    //
+    // Ermittelt Klasse+aktuelle Primaerspezialisierung des Bots (Player::GetPrimarySpecialization()),
+    // schlaegt daraus das passende Artefakt-Item nach (statische Tabelle in der .cpp) und ruestet es
+    // ueber den bereits in Runde 133 live bestaetigten EquipBotItem()-Pfad aus - KEIN Sonderslot/
+    // keine Sonderbehandlung noetig: Player::CanEquipItem()/EquipItem() ermitteln den Zielslot bereits
+    // rein ueber ItemTemplate::InventoryType (auch fuer die als INVTYPE_2HWEAPON kodierten, optisch
+    // dual-wield gerenderten Artefakte wie "Warswords of the Valarjar" - EIN Item-Entry pro
+    // Spezialisierung reicht, die zweite Waffenhaelfte ist ein reiner Client-Spelldarstellungs-Effekt,
+    // kein zweites Item, siehe .cpp-Kommentar bei der Zuordnungstabelle). Fallback, falls
+    // GetPrimarySpecialization()==0 (frisch erstellter Bot ohne bewusste Spec-Wahl): erste Spec der
+    // Klasse in der Zuordnungstabelle (dokumentierte Vereinfachung, analog GetArmorSubclassForClass()
+    // aus Runde 135 - keine echte Rollen-Erkennung noetig fuer diesen ersten Wurf).
+    bool EquipBotArtifact(uint32 botAccountId);
+
+    // Vergibt Artefakt-Trait-Raenge auf der aktuell in der Main-Hand ausgeruesteten Artefaktwaffe des
+    // Bots (muss vorher per EquipBotArtifact() angelegt worden sein). Direktaufruf-Muster identisch zu
+    // `WorldSession::HandleArtifactAddPower()` (ArtifactHandler.cpp) - dieselben zwei bereits
+    // oeffentlichen Bausteine `Item::SetArtifactPower()`+`Player::ApplyArtifactPowerRank()`, nur ohne
+    // XP-Abzug/Forge-Interaktionscheck (Bot hat keinen Client, der eine Schmiede anklicken koennte).
+    // Ablauf (R138 B.2, "einfachste robuste Variante"): alle `sArtifactPowerStore`-Eintraege fuer die
+    // ArtifactID der Waffe, sortiert nach Tier aufsteigend (dann ID aufsteigend als stabiler
+    // Ersatzschluessel fuer eine "goldene" Prioritaetsreihenfolge - 36 einzeln recherchierte
+    // Community-Prioritaetslisten sind laut R138 explizit NICHT Teil dieser ersten Runde). Pro Trait
+    // wird - EXAKT wie in HandleArtifactAddPower() (ArtifactHandler.cpp:77-101) - zuerst die
+    // ArtifactPowerLink-Verkettung geprueft (ein Trait mit Link-Pflicht wird uebersprungen, bis ein
+    // verlinkter Trait seinen Maximalrang erreicht hat) - dadurch werden nie regelwidrige Zustaende
+    // erzeugt, auch ohne vollstaendiges Baum-Pathfinding. Mehrere Durchlaeufe ueber die sortierte
+    // Traitliste, bis entweder das Budget aufgebraucht ist oder ein voller Durchlauf keinen
+    // Fortschritt mehr macht (alle verbleibenden Traits gesperrt/voll) - kein Endlosschleifenrisiko.
+    //
+    // levelBudget: 0 = automatische Berechnung aus dem aktuellen Bot-Level (R138 B.3-Faustregel,
+    // diese Runde kalibriert: 1 zusaetzlicher Rang pro 2 Charakterlevel oberhalb der
+    // Artefakt-Content-Schwelle Level 98, siehe .cpp - bewusst grob/dokumentiert, keine echte
+    // GtArtifactLevelXPEntry-Kalibrierung in dieser ersten Runde). Ungleich 0: expliziter
+    // Rang-Budget-Override fuer gezielte Tests. Tier-1 ("Konkordanz") wird nur ab Level 102
+    // (grobe Naeherung R138 B.3) automatisch mit InitArtifactPowers() freigeschaltet - dieser Core
+    // kennt laut `MAX_ARTIFACT_TIER` (DBCEnums.h) ohnehin nur Tier 0 und Tier 1, hoehere Tiers sind
+    // architektonisch nicht vorhanden (kein Scope-Verlust gegenueber dem Core).
+    bool SkillBotArtifact(uint32 botAccountId, uint32 levelBudget);
+
     // --- Hooks, die bereits jetzt gefahrlos verdrahtet werden koennen ------
     //
     // Werden aus PlayerScript-Hooks (bot_scriptloader.cpp) fuer JEDEN
@@ -437,6 +747,10 @@ public:
 private:
     BotMgr() = default;
     ~BotMgr() = default;
+
+    // Runde 135: liest/erstellt die dauerhaft fixe Pool-Qualitaetsstufe eines Bots
+    // (characters.bot_gear_tier) - siehe .cpp fuer Details.
+    uint8 GetOrAssignBotGearTier(Player* player);
 
     // Absichtlich leer in dieser Runde - kein Bot kann derzeit angelegt werden.
     std::unordered_map<ObjectGuid, std::unique_ptr<IBotCharacter>> _bots;

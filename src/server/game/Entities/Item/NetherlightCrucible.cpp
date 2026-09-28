@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Legion-Server 2026-09-24 (Runde 14): server-side Netherlight Crucible. See NetherlightCrucible.h for the design and the
  * source of every rule. Nothing here is hard-coded game data except the talent layout (client UI source) and the six
  * artifact-level thresholds (Blizzard preview article); pools, weights, ranks, values and item-level bonus lists are read
@@ -574,7 +574,7 @@ bool IsClientUIEnabled()
     return enabled;
 }
 
-// Layout see NetherlightCrucible.h. Slots without rolled options stay 0 (as the gaps in the reference core), so the client finds
+// Layout see NetherlightCrucible.h. Slots without rolled options stay 0 (as the gaps in LegionCore), so the client finds
 // no talents for that socket and its UI calls AttuneSocketedRelic (Blizzard_ArtifactRelicForgeUI.lua RefreshTalents).
 void UpdateClientField(Item* artifact)
 {

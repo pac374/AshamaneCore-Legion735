@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2017-2018 AshamaneProject <https://github.com/AshamaneProject>
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
@@ -854,7 +854,7 @@ public:
 
             // Round LCF2 R24: Void Torrent (205065) "Insanity does not drain during this channel" - the new stack just
             // recalculated the drain (E1, x stacks), keep it at 0 while the channel runs (spell_r24_pri_void_torrent
-            // restores it when the channel ends). the reference core spell_pri_voidform locks the drain the same way.
+            // restores it when the channel ends). LegionCore spell_pri_voidform locks the drain the same way.
             if (caster->HasAura(205065))
                 if (AuraEffect* drain = caster->GetAuraEffect(SPELL_PRIEST_VOIDFORM_BUFFS, EFFECT_1, caster->GetGUID()))
                     drain->ChangeAmount(0);

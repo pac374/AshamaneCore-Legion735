@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2017-2018 AshamaneProject <https://github.com/AshamaneProject>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -610,9 +610,9 @@ public:
 
                 // Master of Combinations (artifact trait 238095): "Triggering Combo Strikes has a chance to grant
                 // $240672s1 Mastery to you and $s2 allies for $240672d." Round LCF 25.09.2026, mechanic as in
-                // the reference core Spell.cpp (Combo Strikes block). R37 (26.09.2026): re-checked - the client
-                // indeed gives no chance value (trait E0 = 0), but this is not a data gap the reference core is patching
-                // over with a guess: the reference core's Spell.cpp does the identical roll_chance_f(aurEff->GetAmount())
+                // LegionCore-7.3.5 Spell.cpp (Combo Strikes block). R37 (26.09.2026): re-checked - the client
+                // indeed gives no chance value (trait E0 = 0), but this is not a data gap LegionCore is patching
+                // over with a guess: LegionCore's Spell.cpp does the identical roll_chance_f(aurEff->GetAmount())
                 // against the SAME Combo Strikes mastery aura effect (115636, EFFECT_0) directly in live, uncommented
                 // core engine code (not a database row, not a script that could be a coincidence) - i.e. it is the
                 // actual game mechanic, not a data-driven placeholder. Kept as documented (no longer "unsicher" in

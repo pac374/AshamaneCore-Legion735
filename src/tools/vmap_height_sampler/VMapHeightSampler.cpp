@@ -84,6 +84,27 @@ int main(int argc, char* argv[])
     std::string line;
     while (std::getline(std::cin, line))
     {
+        // Strip a UTF-8 byte-order-mark (EF BB BF) if present. PowerShell's
+        // pipe/echo/Out-File machinery routinely prepends one to the first
+        // (sometimes every) line of text sent to a native process's stdin.
+        // Left in place, it corrupts the first token (e.g. "\xEF\xBB\xBF0"
+        // instead of "0"), which makes std::stoul() throw std::invalid_argument.
+        // That uncaught exception is what previously showed up as an opaque
+        // STATUS_STACK_BUFFER_OVERRUN (0xC0000409) crash: on Windows, __fastfail
+        // (which the CRT uses to terminate on an unhandled exception) always
+        // reports that same generic exception code regardless of the real
+        // cause - it is not evidence of an actual stack/buffer overflow.
+        if (line.size() >= 3 &&
+            static_cast<unsigned char>(line[0]) == 0xEF &&
+            static_cast<unsigned char>(line[1]) == 0xBB &&
+            static_cast<unsigned char>(line[2]) == 0xBF)
+            line.erase(0, 3);
+
+        // Also strip a trailing '\r' in case of CRLF input read in binary/text
+        // mode mismatches.
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+            line.pop_back();
+
         if (line.empty())
             continue;
 
@@ -96,48 +117,69 @@ int main(int argc, char* argv[])
         if (fields.size() < 3)
             continue;
 
-        uint32_t mapId = static_cast<uint32_t>(std::stoul(fields[0]));
-        double x = std::stod(fields[1]);
-        double y = std::stod(fields[2]);
-        float searchZ = fields.size() >= 4 ? static_cast<float>(std::stod(fields[3])) : 5000.0f;
-
-        if (!loadedMaps[mapId])
+        uint32_t mapId;
+        double x, y;
+        float searchZ = 5000.0f;
+        try
         {
-            char prefix[16];
-            std::snprintf(prefix, sizeof(prefix), "%04u_", mapId);
-            int loadedCount = 0;
-            std::error_code ec;
-            for (auto const& entry : std::filesystem::directory_iterator(vmapsDir, ec))
-            {
-                std::string fname = entry.path().filename().string();
-                if (fname.size() < 12 || fname.rfind(prefix, 0) != 0 || fname.substr(fname.size() - 7) != ".vmtile")
-                    continue;
-                std::string rest = fname.substr(5, fname.size() - 5 - 7); // strip "MMMM_" and ".vmtile"
-                size_t us = rest.find('_');
-                if (us == std::string::npos)
-                    continue;
-                int a = std::atoi(rest.substr(0, us).c_str());
-                int b = std::atoi(rest.substr(us + 1).c_str());
-                vmgr.loadMap(vmapsDir.c_str(), mapId, a, b);
-                vmgr.loadMap(vmapsDir.c_str(), mapId, b, a);
-                ++loadedCount;
-            }
-            loadedMaps[mapId] = true;
-            if (debug)
-                std::cerr << "[debug] loaded " << loadedCount << " vmap tile files (both orderings) for map " << mapId << std::endl;
+            mapId = static_cast<uint32_t>(std::stoul(fields[0]));
+            x = std::stod(fields[1]);
+            y = std::stod(fields[2]);
+            if (fields.size() >= 4)
+                searchZ = static_cast<float>(std::stod(fields[3]));
+        }
+        catch (std::exception const& e)
+        {
+            std::cerr << "[error] failed to parse input line \"" << line << "\": " << e.what() << std::endl;
+            continue;
         }
 
-        float z = vmgr.getHeight(mapId, static_cast<float>(x), static_cast<float>(y), searchZ, maxSearchDist);
+        try
+        {
+            if (!loadedMaps[mapId])
+            {
+                char prefix[16];
+                std::snprintf(prefix, sizeof(prefix), "%04u_", mapId);
+                int loadedCount = 0;
+                std::error_code ec;
+                for (auto const& entry : std::filesystem::directory_iterator(vmapsDir, ec))
+                {
+                    std::string fname = entry.path().filename().string();
+                    if (fname.size() < 12 || fname.rfind(prefix, 0) != 0 || fname.substr(fname.size() - 7) != ".vmtile")
+                        continue;
+                    std::string rest = fname.substr(5, fname.size() - 5 - 7); // strip "MMMM_" and ".vmtile"
+                    size_t us = rest.find('_');
+                    if (us == std::string::npos)
+                        continue;
+                    int a = std::atoi(rest.substr(0, us).c_str());
+                    int b = std::atoi(rest.substr(us + 1).c_str());
+                    vmgr.loadMap(vmapsDir.c_str(), mapId, a, b);
+                    vmgr.loadMap(vmapsDir.c_str(), mapId, b, a);
+                    ++loadedCount;
+                }
+                loadedMaps[mapId] = true;
+                if (debug)
+                    std::cerr << "[debug] loaded " << loadedCount << " vmap tile files (both orderings) for map " << mapId << std::endl;
+            }
 
-        if (debug)
-            std::cerr << "[debug] map=" << mapId << " x=" << x << " y=" << y << " searchZ=" << searchZ << " -> raw=" << z << std::endl;
+            float z = vmgr.getHeight(mapId, static_cast<float>(x), static_cast<float>(y), searchZ, maxSearchDist);
 
-        std::cout << fields[0] << ";" << fields[1] << ";" << fields[2] << ";";
-        if (z <= VMAP_INVALID_HEIGHT)
-            std::cout << "NaN";
-        else
-            std::cout << z;
-        std::cout << std::endl;
+            if (debug)
+                std::cerr << "[debug] map=" << mapId << " x=" << x << " y=" << y << " searchZ=" << searchZ << " -> raw=" << z << std::endl;
+
+            std::cout << fields[0] << ";" << fields[1] << ";" << fields[2] << ";";
+            if (z <= VMAP_INVALID_HEIGHT)
+                std::cout << "NaN";
+            else
+                std::cout << z;
+            std::cout << std::endl;
+        }
+        catch (std::exception const& e)
+        {
+            std::cerr << "[error] exception while processing line \"" << line << "\": " << e.what() << std::endl;
+            std::cout << fields[0] << ";" << fields[1] << ";" << fields[2] << ";NaN" << std::endl;
+            continue;
+        }
     }
 
     return 0;

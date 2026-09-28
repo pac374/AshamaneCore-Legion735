@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -21,7 +21,7 @@ void AddSC_outdoorpvp_na();
 void AddSC_outdoorpvp_si();
 void AddSC_outdoorpvp_tf();
 void AddSC_outdoorpvp_zm();
-// Legion-Server round 44: ported from the reference core's invasion_point_argus.cpp (OutdoorPVPArgusInvasion).
+// Legion-Server round 44: ported from LegionCore's invasion_point_argus.cpp (OutdoorPVPArgusInvasion).
 void AddSC_outdoorpvp_argus();
 
 // The name of this function should match:

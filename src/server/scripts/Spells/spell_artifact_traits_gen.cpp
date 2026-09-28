@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -494,7 +494,7 @@ class gen_arti_pri_share_in_the_light : public SpellScript
         if (amount <= 0)
             return;
 
-        // Round LCF2 R23: the reference core (spell_priest.cpp, PW:S CalculateAmount) puts the share on the client's own
+        // Round LCF2 R23: LegionCore-7.3.5 (spell_priest.cpp, PW:S CalculateAmount) puts the share on the client's own
         // helper 210027 "Share in the Light" (SCHOOL_ABSORB, 15 s) with bp = $s1 % of the target's shield - not on a
         // second Power Word: Shield (that one would also bring Weakened Soul / Atonement side effects of 17).
         caster->CastCustomSpell(210027, SPELLVALUE_BASE_POINT0, amount, caster, true);
@@ -1385,11 +1385,11 @@ class scriptName : public SpellScript                                           
 GEN_TRAIT_CRIT_CHANCE_VS_AURA(gen_arti_hun_marked_for_death, 190529, 187131)
 
 // 12294 - Mortal Strike, 163201/5308 - Execute; Precise Strikes (248579).
-// Round LCF2 R23: the earlier assumption ("no separate buff spell in the client") was wrong. the reference core
+// Round LCF2 R23: the earlier assumption ("no separate buff spell in the client") was wrong. LegionCore-7.3.5
 // spell_trigger 248579 -> 248195 (proc on Colossus Smash 167105 / Warbreaker 209577, spell_proc_event family masks)
 // shows the client buff 248195 "Precise Strikes" (15 s, ADD_PCT/FLAT_MODIFIER SPELLMOD_CRITICAL_CHANCE on the class
 // masks of Mortal Strike + Execute, $s1 = trait value). The crit itself is therefore done by the client spell
-// modifier; "next" = one use (the reference core SpellMgr.cpp sets ProcCharges = 1 for 248195). This script only consumes
+// modifier; "next" = one use (LegionCore SpellMgr.cpp sets ProcCharges = 1 for 248195). This script only consumes
 // the buff after a Mortal Strike / Execute. The buff is given by spell_r23_war_precise_strikes_apply
 // (spell_lcf2r23_2026_09_25.cpp) on Colossus Smash / Warbreaker.
 class gen_arti_war_precise_strikes : public SpellScript
@@ -2427,7 +2427,7 @@ class gen_arti_pri_aegis_of_wrath : public AuraScript
 
     // Round LCF2 R24 - the decay part, no longer "uncertain": the trait's E1 is a flat modifier (SpellModOp 12 = second
     // effect) on Power Word: Shield, i.e. it fills PW:S E1 (PERIODIC_DUMMY, 1 s, base 0) with $s2 = 3. That E1 amount IS
-    // the decay rate - it is not applied anywhere else, so nothing is counted twice. the reference core spell_pri_power_word_shield
+    // the decay rate - it is not applied anywhere else, so nothing is counted twice. LegionCore spell_pri_power_word_shield
     // (CalculateAmount1/OnTick): step = E1 % of the shield's starting absorb, subtracted every tick, shield removed when
     // used up. Without the trait E1 stays 0 and nothing happens.
     void CalculateDecay(AuraEffect const* /*aurEff*/, int32& amount, bool& /*canBeRecalculated*/)
@@ -3035,7 +3035,7 @@ class gen_arti_dk_runic_chills : public SpellScript
 // shows what is counted: every DIFFERENT enemy that took damage (> 0) from a Remorseless Winter tick (196771); the
 // list is cleared when Remorseless Winter (196770) ends, and the burst fires only when it runs out (not on cancel).
 // The percentage is effect 1 of the trait (100). "Additional" is taken literally from the client text: the first
-// enemy does not count -> burst x n. Round LCF2 R24: the reference core spell_dk_frozen_soul (damage x stacks of the client
+// enemy does not count -> burst x n. Round LCF2 R24: LegionCore spell_dk_frozen_soul (damage x stacks of the client
 // aura 204957, one stack per enemy) gives the same x n, only SimC's model gives x (1 + n) -> no longer "unsicher".
 // Cap: 204957 stacks to 20 in the client (SpellAuraOptions CumulativeAura 20), so at most 20 enemies count.
 namespace
@@ -3313,7 +3313,7 @@ class gen_arti_monk_tornado_kicks : public SpellScript
 // unit within 25 yd of the healed target with the lowest health percentage, without Renewing Mist from this
 // monk) - SimC does not model the target choice here, so this half stays "unsicher" on target selection.
 // R37 (26.09.2026): the OTHER half - "initially cast" - is now implemented too, in
-// spell_monk.cpp (spell_monk_renewing_mist::HandleHit, bound to 115151), using the reference core's actual
+// spell_monk.cpp (spell_monk_renewing_mist::HandleHit, bound to 115151), using LegionCore's actual
 // spell_monk_renewing_mist_main::HandleBeforeCast logic (group member within 50 yd, group order, not
 // health-sorted) - see the comment there for the source. That half is no longer a guess.
 class gen_arti_monk_dancing_mists : public SpellScript
@@ -4262,10 +4262,10 @@ class gen_arti_dru_echoing_stars : public SpellScript
 // system applies to the trait aura natively; SimC also rolls once per Marked Shot cast (185901). Targets: every
 // enemy with this hunter's Vulnerable (187131) within Marked Shot's own search radius (185901 effect 0, same as
 // spell_hun_marked_shot). SimC fires 191070 twice per target, the client text/data give no count - here once per
-// target. Round LCF2 R23: the reference core settles the count - spell_target_filter 191323 keeps only targets with
+// target. Round LCF2 R23: LegionCore-7.3.5 settles the count - spell_target_filter 191323 keeps only targets with
 // Vulnerable 187131, spell_dummy_trigger 191323 -> 191061 "Wind Arrow Barrage" (client: TRIGGER_MISSILE -> 191070)
 // once per target. So the arrow is now sent through 191061 (missile visual of the client) instead of 191070 directly.
-// (the reference core additionally delays the barrage by 500 ms, spell_trigger option 45 - a server value, not taken over.)
+// (LegionCore additionally delays the barrage by 500 ms, spell_trigger option 45 - a server value, not taken over.)
 class gen_arti_hun_call_of_the_hunter : public AuraScript
 {
     PrepareAuraScript(gen_arti_hun_call_of_the_hunter);
@@ -4331,7 +4331,7 @@ class gen_arti_hun_call_of_the_hunter : public AuraScript
 // ===============================================================================================================
 
 // Crystalline Swords (189186) - round LCF2 R24: counted as proven (Blizzard designer post + SimC 7.3.5 agree; only
-// the reference core uses a plain chance model instead): "Your melee attacks have a chance to create icy copies of Icebringer and
+// LegionCore uses a plain chance model instead): "Your melee attacks have a chance to create icy copies of Icebringer and
 // Frostreaper, which will then stab and pierce your foes."
 // Client: proc mask 20 (melee), ProcChance 45; damage spells 205164/205165 ("$@spelldesc189186", 1.2 AP each).
 // Missing before: when the swords actually strike. Blizzard game designer Celestalon, Legion beta forum, 25.04.2016:
@@ -5859,7 +5859,7 @@ class gen_arti_dru_hardened_roots : public AuraScript
 // UNSICHER: the tooltip names no upper limit and none is in the client (207744/207771 Duration = MaxDuration = 8000).
 // SimulationCraft caps the brand at 10 s (MAX_FIERY_BRAND_DURATION, no source given); a PTR analysis of 02.03.2017
 // (kaylriene.com) computed without a cap. Implemented literally without a cap.
-// Round LCF2 R23: the reference core spell_dh.cpp (spell_dh_flaming_soul, proc on Immolation Aura / Soul Carver damage)
+// Round LCF2 R23: LegionCore-7.3.5 spell_dh.cpp (spell_dh_flaming_soul, proc on Immolation Aura / Soul Carver damage)
 // also extends without any cap -> second independent implementation without a cap; no longer "unsicher".
 namespace FlamingSoul
 {
@@ -5885,7 +5885,7 @@ namespace FlamingSoul
                 brand->SetDuration(duration);
                 extended = true;
 
-                // Round LCF2 R23 (the reference core spell_dh_flaming_soul): the Fiery Demise debuff 212818 that comes with the
+                // Round LCF2 R23 (LegionCore spell_dh_flaming_soul): the Fiery Demise debuff 212818 that comes with the
                 // brand is kept in step with it
                 if (Aura* demise = target->GetAura(212818, dh->GetGUID()))
                 {
@@ -5979,10 +5979,11 @@ class gen_arti_war_death_and_glory : public SpellScript
 };
 
 // ===============================================================================================================
-// Round LCF (25.09.2026): open traits checked against an external reference implementation and its
-// world database. Only the MECHANIC was taken over; every number still comes from our own
+// Round LCF (25.09.2026): open traits checked against LegionCore-7.3.5 (github.com/The-Legion-Preservation-Project/
+// LegionCore-7.3.5, derived from the UWOW 2020 leak - used with the explicit permission of the server owner) and its
+// world database (schema legioncore_full). Only the MECHANIC was taken over; every number still comes from our own
 // 7.3.5.26972 client data (trait aura amount, EffectTriggerSpell, base points of the named helper spells). Where
-// the reference source relies on something the client does not state, the script says so ("UNSICHER").
+// LegionCore relies on something the client does not state, the script says so ("UNSICHER").
 // ===============================================================================================================
 
 namespace
@@ -5995,10 +5996,10 @@ namespace
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Pattern 11 (the reference core table spell_aura_dummy, option 4 = SPELL_DUMMY_MOD_EFFECT_MASK, SpellAuras.cpp
+// Pattern 11 (LegionCore table spell_aura_dummy, option 4 = SPELL_DUMMY_MOD_EFFECT_MASK, SpellAuras.cpp
 // CalculateEffMaskFromDummy / Spell.cpp): the listed effects of a spell exist ONLY while the owner has the trait. The
 // client carries the finished effect on the spell itself and names the trait in the tooltip ("$?a179546[...]");
-// without the trait the effect must not happen at all. Used uniformly for every trait the reference core handles this way:
+// without the trait the effect must not happen at all. Used uniformly for every trait LegionCore handles this way:
 //   Death's Harbinger 238080  -> Apocalypse 220143 E3 (ENERGIZE 2 runes)
 //   Aluneth's Avarice 238090  -> Mark of Aluneth 211076 E1 (ENERGIZE_PCT 20 % mana)
 //   Embrace of the Nightmare 200855 -> Rage of the Sleeper 200851 E2/E3/E4 (loss-of-control immunity, leech, damage)
@@ -6040,7 +6041,7 @@ GEN_TRAIT_GATED_EFFECTS(gen_arti_dru_embrace_of_the_nightmare, 200855, 0x1C) // 
 GEN_TRAIT_GATED_EFFECTS(gen_arti_pal_ashes_to_ashes_dot, 179546, 0x04)       // 205273 Wake of Ashes, E2
 
 // Focus in Chaos (200871): "Your auto attacks have no penalty to hit from dual-wielding during Enrage."
-// the reference core: spell_linked_spell 184362 -> 200876 (hastalent 200871). 200876 carries aura 458
+// LegionCore: spell_linked_spell 184362 -> 200876 (hastalent 200871). 200876 carries aura 458
 // SPELL_AURA_IGNORE_DUAL_WIELD_HIT_PENALTY - the only client spell with that aura; the core now honours it in
 // Unit::MeleeSpellMissChance (the +19 % dual-wield miss chance). The helper lives exactly as long as Enrage.
 class gen_arti_war_focus_in_chaos : public AuraScript
@@ -6078,9 +6079,9 @@ class gen_arti_war_focus_in_chaos : public AuraScript
 };
 
 // Black Claws (238116): "While under the effect of Dark Transformation, your ghoul's Claw has a $s1% chance to burst a
-// Festering Wound." the reference core spell_dk_black_claws (spell_dk.cpp) on 91778 Sweeping Claws, the Claw of the
+// Festering Wound." LegionCore spell_dk_black_claws (spell_dk.cpp) on 91778 Sweeping Claws, the Claw of the
 // transformed ghoul. The burst follows OUR core's burst convention (spell_dk_scourge_strike: 194311 on the target, one
-// stack less), not the reference core's extra 195757 - so all bursts behave the same on this server.
+// stack less), not LegionCore's extra 195757 - so all bursts behave the same on this server.
 class gen_arti_dk_black_claws : public SpellScript
 {
     PrepareSpellScript(gen_arti_dk_black_claws);
@@ -6121,7 +6122,7 @@ class gen_arti_dk_black_claws : public SpellScript
 
 // The Light Saves (200421): "When the health of your Beacon of Light target falls below $s1%, your next Holy Light or
 // Flash of Light on your Beacon target will heal for an additional $200423s1%. Can occur only once every $211426d."
-// the reference core (spell_pal_the_light_saves_aura) polls the beacon targets and hands out 200423 + the 211426 lockout.
+// LegionCore (spell_pal_the_light_saves_aura) polls the beacon targets and hands out 200423 + the 211426 lockout.
 // Here the same rule is checked when the Holy Light / Flash of Light lands on a beacon target of the paladin (health
 // below the trait value, no 211426 lockout) - no timer needed. Numbers: trait $s1 (50), 200423 E0 (100), 211426 duration.
 class gen_arti_pal_the_light_saves : public SpellScript
@@ -6165,7 +6166,7 @@ class gen_arti_pal_the_light_saves : public SpellScript
 };
 
 // Siphon Power (218910): "Empower Wards increases your Agility by up to $s1% for $218561d, based on magic damage you
-// take while it is active." the reference core spell_dh_empower_wards: E1 of Empower Wards (SCHOOL_ABSORB, magic schools) is
+// take while it is active." LegionCore spell_dh_empower_wards: E1 of Empower Wards (SCHOOL_ABSORB, magic schools) is
 // only a listener - the magic damage taken is summed up in the client tracker 218713, and 218561 (MOD_TOTAL_STAT_PCT)
 // is refreshed with (sum * 100 / max health) %, capped at the trait value. Without the trait E1 keeps its client value.
 class gen_arti_dh_siphon_power : public AuraScript
@@ -6218,7 +6219,7 @@ class gen_arti_dh_siphon_power : public AuraScript
 };
 
 // Sharpened Dreadfangs (211123): "Increases the critical strike chance of Dreadstalkers by $s1%."
-// the reference core: spell_pet_auras (98035 -> 215111, aura 211123) + spell_warl_sharpened_dreadfangs (amount = trait value).
+// LegionCore: spell_pet_auras (98035 -> 215111, aura 211123) + spell_warl_sharpened_dreadfangs (amount = trait value).
 // 215111 is MOD_CRIT_PCT on the Dreadstalker itself; our Call Dreadstalkers summons them synchronously (193331/193332,
 // creature 98035), so after the cast each new Dreadstalker of the warlock gets 215111 with the trait value.
 class gen_arti_lock_sharpened_dreadfangs : public SpellScript
@@ -6260,7 +6261,7 @@ class gen_arti_lock_sharpened_dreadfangs : public SpellScript
 };
 
 // Jaws of Shadow (238109): "Dreadbite increases damage taken from your Wild Imps' Fel Firebolt by $s1%."
-// the reference core spell_warl_dreadbite: the Dreadstalker puts 242922 (dummy, E0 "Fel Firebolt +$s1%") on its target with the
+// LegionCore spell_warl_dreadbite: the Dreadstalker puts 242922 (dummy, E0 "Fel Firebolt +$s1%") on its target with the
 // trait value, the warlock as original caster. Part 1 (Dreadbite 205196) applies it, part 2 (Fel Firebolt 104318, cast
 // by the Wild Imp with the warlock as original caster, spell_warlock.cpp npc AI) reads it.
 class gen_arti_lock_jaws_of_shadow : public SpellScript
@@ -6597,7 +6598,7 @@ void AddSC_artifact_trait_gen_spell_scripts()
     RegisterSpellScript(gen_arti_dh_flaming_soul);
     RegisterAuraScript(gen_arti_dh_flaming_soul_dot);
     RegisterSpellScript(gen_arti_war_death_and_glory);
-    // Round LCF (report section "Runde LCF (25.09.2026)") - mechanics checked against the reference core
+    // Round LCF (report section "Runde LCF (25.09.2026)") - mechanics checked against LegionCore-7.3.5
     RegisterSpellScript(gen_arti_dk_deaths_harbinger);
     RegisterSpellScript(gen_arti_mage_aluneths_avarice);
     RegisterSpellScript(gen_arti_dru_embrace_of_the_nightmare);

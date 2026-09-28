@@ -1,0 +1,1565 @@
+/*
+* Copyright (C) 2017-2018 AshamaneProject <https://github.com/AshamaneProject>
+* Copyright (C) 2025-2026 LegionEmulationProject <https://github.com/LegionEmulationProject>
+*
+* This program is free software; you can redistribute it and/or modify it
+* under the terms of the GNU General Public License as published by the
+* Free Software Foundation; either version 2 of the License, or (at your
+* option) any later version.
+*
+* This program is distributed in the hope that it will be useful, but WITHOUT
+* ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+* FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+* more details.
+*
+* You should have received a copy of the GNU General Public License along
+* with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+#include "AreaTrigger.h"
+#include "AreaTriggerAI.h"
+#include "Creature.h"
+#include "GameObject.h"
+#include "GameObjectAI.h"
+#include "Garrison.h"
+#include "MotionMaster.h"
+#include "ObjectAccessor.h"
+#include "PhasingHandler.h"
+#include "Player.h"
+#include "ScriptMgr.h"
+#include "ScriptedCreature.h"
+#include "ScriptedGossip.h"
+#include "ScriptedEscortAI.h"
+#include "SpellScript.h"
+#include "TemporarySummon.h"
+#include "WodGarrison.h"
+
+#include "Chat.h"
+#include "WorldSession.h"
+
+enum PreGarrisonQuests
+{
+    QUEST_FINDING_A_FOOTHOLD                = 34582,
+    QUEST_FOR_THE_ALLIANCE                  = 34583,
+
+    QUEST_ESTABLISH_YOUR_GARRISON           = 34586,
+};
+
+enum PreGarrisonNPCs
+{
+    NPC_PROPHET_VELEN 		                = 79635,
+    NPC_YREL 		  		                = 79656,
+    NPC_ARCHMAGE_KHADGAR 	                = 79657,
+    NPC_VINDICATOR_MARAAD                   = 79655,
+
+    NPC_FINDING_A_FOOTHOLD_KILL_CREDIT      = 79697,
+    NPC_FOR_THE_ALLIANCE_PORTAL_KILL_CREDIT = 79433,
+    NPC_ESTABLISH_YOUR_GARRISON_KILL_CREDIT = 79757,
+};
+
+enum ShadowmoonPreGarrisonSpells
+{	
+	SPELL_TRIGGER_MULTI_SPELL_GARRISON_INTRO = 160856,
+};
+
+enum PreGarrisonEtc
+{
+    ACTION_FINDING_A_FOOTHOLD,
+    MOUNT_ELEKK = 59341,
+
+    WP_POSITION_END = 13,
+};
+
+class quest_finding_a_foothold : public QuestScript
+{
+public:
+	quest_finding_a_foothold() : QuestScript("quest_finding_a_foothold") { }
+		
+	void OnQuestStatusChange(Player* player, Quest const* /*quest*/, QuestStatus oldStatus, QuestStatus newStatus) override
+	{
+		if (newStatus == QUEST_STATUS_INCOMPLETE && oldStatus == QUEST_STATUS_NONE)
+		{
+            PhasingHandler::OnConditionChange(player);
+            player->KilledMonsterCredit(NPC_FINDING_A_FOOTHOLD_KILL_CREDIT);
+			player->CastSpell(nullptr, SPELL_TRIGGER_MULTI_SPELL_GARRISON_INTRO, false);
+			
+			if (Creature* velen = player->FindNearestCreature(NPC_PROPHET_VELEN, 40.0f))
+			{
+				if (Creature* yrel = player->FindNearestCreature(NPC_YREL, 40.0f))
+				{
+					if (Creature* maraad = player->FindNearestCreature(NPC_VINDICATOR_MARAAD, 40.0f))
+					{
+						if (Creature* khadgar = player->FindNearestCreature(NPC_ARCHMAGE_KHADGAR, 40.0f))
+						{
+							velen->AI()->DoAction(ACTION_FINDING_A_FOOTHOLD);
+							yrel->AI()->DoAction(ACTION_FINDING_A_FOOTHOLD);
+							maraad->AI()->DoAction(ACTION_FINDING_A_FOOTHOLD);
+							khadgar->AI()->DoAction(ACTION_FINDING_A_FOOTHOLD);
+						}
+					}
+				}
+			}
+		}
+	}
+};
+
+uint32 const velenpathSize = 14;
+Position const velenPath[velenpathSize] =
+{
+	{ 2285.47f, 498.666f, 11.179f },
+	{ 2246.74f, 511.281f, 17.436f },
+	{ 2213.81f, 485.680f, 19.235f },
+	{ 2192.85f, 494.852f, 20.282f },
+	{ 2179.35f, 475.454f, 19.370f },
+	{ 2160.54f, 425.743f, 16.468f },
+	{ 2106.98f, 430.783f, 19.602f },
+	{ 2060.30f, 433.924f, 32.206f },
+	{ 1986.57f, 447.605f, 61.786f },
+	{ 1939.39f, 434.839f, 73.518f },
+	{ 1913.16f, 398.210f, 84.907f },
+	{ 1907.27f, 372.948f, 89.555f },
+	{ 1905.44f, 338.319f, 87.961f },
+	{ 1929.18f, 334.369f, 89.061f }
+};
+
+enum VelenSummon
+{
+    SAY_PROPHET_VELEN_FIRST_LINE 	= 0,
+	SAY_PROPHET_VELEN_SECOND_LINE 	= 1,
+};
+
+/// Velen 79635
+class npc_prophet_velen_79635 : public CreatureScript
+{
+public:
+	npc_prophet_velen_79635() : CreatureScript("npc_prophet_velen_79635") { }
+
+    struct npc_prophet_velen_79635AI : public npc_escortAI
+    {
+    	npc_prophet_velen_79635AI(Creature* creature) : npc_escortAI(creature) { }
+
+        void DoAction(int32 const action) override
+    	{
+    		switch (action)
+    		{
+                case ACTION_FINDING_A_FOOTHOLD:
+    				me->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_NPC_FLAG_QUESTGIVER);
+                    AddTimedDelayedOperation(5.9 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+                    {
+                        Talk(SAY_PROPHET_VELEN_FIRST_LINE);
+                    });
+                    AddTimedDelayedOperation(10.2 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+                    {
+                        me->SetWalk(false);
+						me->SetSpeed(MOVE_RUN, 3.5f);
+                        me->Mount(MOUNT_ELEKK);
+                    });
+                    AddTimedDelayedOperation(15 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+                    {
+                        me->GetMotionMaster()->MoveSmoothPath(WP_POSITION_END, velenPath, velenpathSize, false, false);
+                    });
+                    AddTimedDelayedOperation(21 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+                    {
+                        Talk(SAY_PROPHET_VELEN_SECOND_LINE);
+                        me->DespawnOrUnsummon(20000);
+                    });
+    				break;
+    			default:
+    				break;
+    		}
+    	}
+        
+        void WaypointReached(uint32 waypointId) override
+        {
+            switch(waypointId)
+            {
+                case WP_POSITION_END:
+                    me->DespawnOrUnsummon();
+                    break;
+                default:
+                    break;
+            }
+        }
+    };
+
+	CreatureAI* GetAI(Creature* creature) const
+	{
+		return new npc_prophet_velen_79635AI(creature);
+	}
+};
+
+uint32 const yrelpathsize = 14;
+Position const yrelPath[yrelpathsize] =
+{
+	{ 2285.47f, 498.666f, 11.179f },
+	{ 2246.74f, 511.281f, 17.436f },
+	{ 2213.81f, 485.680f, 19.235f },
+	{ 2192.85f, 494.852f, 20.282f },
+	{ 2179.35f, 475.454f, 19.370f },
+	{ 2160.54f, 425.743f, 16.468f },
+	{ 2106.98f, 430.783f, 19.602f },
+	{ 2060.30f, 433.924f, 32.206f },
+	{ 1986.57f, 447.605f, 61.786f },
+	{ 1939.39f, 434.839f, 73.518f },
+	{ 1913.16f, 398.210f, 84.907f },
+	{ 1907.27f, 372.948f, 89.555f },
+	{ 1905.44f, 338.319f, 87.961f },
+	{ 1928.17f, 331.390f, 89.194f }
+};
+
+enum YrelSummon
+{
+	POINT_FIRST_POSITION     		= 0,
+	POINT_BACK_POSITION 	 		= 1,
+
+    SAY_YREL_FIRST_LINE 	 		= 0,
+};
+
+/// 79656 - Yrel
+class npc_yrel_79656 : public CreatureScript
+{
+public:
+	npc_yrel_79656() : CreatureScript("npc_yrel_79656") { }
+
+	struct npc_yrel_79656AI : public npc_escortAI
+	{
+		npc_yrel_79656AI(Creature* creature) : npc_escortAI(creature) { }
+
+		void DoAction(int32 const action) override
+		{
+			switch (action)
+			{
+				case ACTION_FINDING_A_FOOTHOLD:
+                    AddTimedDelayedOperation(1 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+                    {
+						me->SetSpeed(MOVE_RUN, 1.8f);
+						me->SetWalk(true);
+						me->GetMotionMaster()->MovePoint(POINT_FIRST_POSITION, 2304.2285f, 458.3234f, 7.2519f);
+						Talk(SAY_YREL_FIRST_LINE);
+                    });
+                    AddTimedDelayedOperation(3 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+                    {
+                        me->GetMotionMaster()->MoveBackward(POINT_BACK_POSITION, 2306.1201f, 457.556f, 6.81435f, 1.0f);
+                    });
+                    AddTimedDelayedOperation(10.2 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+                    {
+						me->SetWalk(false);
+						me->SetSpeed(MOVE_RUN, 3.5f);
+						me->Mount(MOUNT_ELEKK);                       
+                    });
+                    AddTimedDelayedOperation(15 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+                    {
+                        me->GetMotionMaster()->MoveSmoothPath(1, yrelPath, yrelpathsize, false, false);
+                        me->DespawnOrUnsummon(30000);
+                    });
+					break;
+				default:
+					break;
+			}
+		}
+
+        void WaypointReached(uint32 waypointId) override
+        {
+            switch(waypointId)
+            {
+                case WP_POSITION_END:
+                    me->DespawnOrUnsummon();
+                    break;
+                default:
+                    break;
+            }
+        }
+	};
+
+    CreatureAI* GetAI(Creature* creature) const
+	{
+		return new npc_yrel_79656AI(creature);
+	}
+};
+
+uint32 const maraadpathsize = 14;
+Position const maraadPath[maraadpathsize] =
+{
+	{ 2285.47f, 498.666f, 11.179f },
+	{ 2246.74f, 511.281f, 17.436f },
+	{ 2213.81f, 485.680f, 19.235f },
+	{ 2192.85f, 494.852f, 20.282f },
+	{ 2179.35f, 475.454f, 19.370f },
+	{ 2160.54f, 425.743f, 16.468f },
+	{ 2106.98f, 430.783f, 19.602f },
+	{ 2060.30f, 433.924f, 32.206f },
+	{ 1986.57f, 447.605f, 61.786f },
+	{ 1939.39f, 434.839f, 73.518f },
+	{ 1918.38f, 408.908f, 82.147f },
+	{ 1913.16f, 398.210f, 84.907f },
+	{ 1924.10f, 370.395f, 88.561f },
+	{ 1935.21f, 339.734f, 88.965f }
+};
+
+enum MaraadSummon
+{
+    SAY_MARAAD_FIRST_LINE 			= 0
+};
+
+/// 79655 - Maraad
+class npc_vindicator_maraad_79655 : public CreatureScript
+{
+public:
+	npc_vindicator_maraad_79655() : CreatureScript("npc_vindicator_maraad_79655") { }
+
+	struct npc_vindicator_maraad_79655AI : public npc_escortAI
+	{
+		npc_vindicator_maraad_79655AI(Creature* creature) : npc_escortAI(creature) { }
+
+		void DoAction(int32 const action) override
+		{
+			switch (action)
+			{
+				case ACTION_FINDING_A_FOOTHOLD:
+                    AddTimedDelayedOperation(10.2 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+                    {
+						me->SetSpeed(MOVE_RUN, 3.5f);
+						me->Mount(MOUNT_ELEKK);
+                        
+                    });
+					AddTimedDelayedOperation(11 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+                    {
+                        Talk(SAY_MARAAD_FIRST_LINE);
+                        me->GetMotionMaster()->MoveSmoothPath(1, maraadPath, maraadpathsize, false, false);
+                        me->DespawnOrUnsummon(30000);
+                    });
+					break;
+				default:
+					break;
+			}
+		}
+		
+        void WaypointReached(uint32 waypointId) override
+        {
+            switch(waypointId)
+            {
+                case WP_POSITION_END:
+                    me->DespawnOrUnsummon();
+                    break;
+                default:
+                    break;
+            }
+        }
+	};
+
+	CreatureAI* GetAI(Creature* creature) const
+	{
+		return new npc_vindicator_maraad_79655AI(creature);
+	}
+};
+
+uint32 const khadgarpathsize = 8;
+Position const khadgarPath[khadgarpathsize] =
+{
+	{ 2294.50f, 472.349f, 49.315f  },
+	{ 2239.88f, 505.235f, 57.756f  },
+	{ 2121.82f, 454.399f, 76.726f  },
+	{ 2014.69f, 449.873f, 81.194f  },
+	{ 1923.04f, 449.579f, 120.345f },
+	{ 1911.51f, 397.002f, 115.995f },
+	{ 1955.58f, 359.063f, 105.998f },
+	{ 1943.91f, 339.194f, 88.932f  }
+};
+
+enum KhadgarFindingAFoothold
+{	
+	SPELL_TRANSFORM_RAVEN_FORM = 165291,
+	
+	PATH_KHADGAR   			   = 7965700,
+};
+
+/// 79657 - Khadgar
+class npc_archmage_khadgar_79657 : public CreatureScript
+{
+public:
+	npc_archmage_khadgar_79657() : CreatureScript("npc_archmage_khadgar_79657") { }
+
+	struct npc_archmage_khadgar_79657AI : public npc_escortAI
+	{
+		npc_archmage_khadgar_79657AI(Creature* creature) : npc_escortAI(creature) { }
+		
+		void DoAction(int32 const action) override
+		{
+			switch (action)
+			{
+				case ACTION_FINDING_A_FOOTHOLD:
+				{	
+                    AddTimedDelayedOperation(10.2 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+                    {
+                        me->CastSpell(me, SPELL_TRANSFORM_RAVEN_FORM, false);
+                        me->SetSpeed(MOVE_FLIGHT, 3.0f);
+                        me->SetDisableGravity(true);
+                        me->SetCanFly(true);
+                    });
+
+                    AddTimedDelayedOperation(11 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+                    {
+                        me->GetMotionMaster()->MoveSmoothPath(1, khadgarPath, khadgarpathsize, false, true);
+                    });
+                    break;
+				}
+				default:
+					break;
+			}
+		}
+
+        void WaypointReached(uint32 waypointId)
+        {
+            if (waypointId = 7)
+            {
+                me->DespawnOrUnsummon();
+            }
+        }
+	};
+
+	CreatureAI* GetAI(Creature* creature) const
+	{
+		return new npc_archmage_khadgar_79657AI(creature);
+	}
+};
+
+/* For The Alliance Start */
+enum QuestForTheAlliance
+{
+    ACTION_KHADGAR_SUMMON_PORTAL,
+
+    NPC_VINDICATOR_MARAAD_LUNARFALL          = 79470,
+    NPC_PROPHET_VELEN_LUNARFALL              = 79241,
+
+	OBJECTIVE_PLANT_ALLIANCE_BANNER          = 272853,
+	OBJECTIVE_OPEN_THE_PORTAL                = 273766,
+
+    SAY_PROPHET_VELEN_FIRST                  = 0,
+    SAY_VINDICATOR_MARAAD_SECOND             = 1,
+
+	SPELL_SUMMON_KHADGAR_OPEN_PORTAL         = 165242, 
+	SPELL_SUMMON_ALLIANCE_GARRISON_GUARD 	 = 160404,
+	SPELL_SUMMON_PORTAL_EFFECTS_BUNNY    	 = 160429,
+	SPELL_SUMMON_ALLIANCE_GARRISON_GUARD_002 = 160416,
+	SPELL_SUMMON_STARFALL_SENTINEL_001       = 165278,
+	SPELL_SUMMON_ASSISTANT_BRIGHTSTONE_002   = 165275,
+	SPELL_SUMMON_GARRISON_LABORER_001        = 165274,
+	SPELL_SUMMON_GARRISON_LABORER_004        = 165277,
+	SPELL_SUMMON_JARRON_HAMBY                = 160801, 
+	SPELL_SUMMON_SHELLY_HAMBY                = 160800, 
+	SPELL_SUMMON_PIPPERS                     = 165273,
+	SPELL_SUMMON_GARRISON_LABORER_003        = 165276,
+	SPELL_SUMMON_ZIPFIZZLE                   = 160417,
+	SPELL_SUMMON_PACKMULE                    = 160418,
+	SPELL_SUMMON_BAROS_ALEXSTON              = 160419,
+
+	SPELL_SUMMON_WOODPILE_1                  = 165281,
+	SPELL_SUMMON_WOODPILE_2                  = 165285,
+};
+
+// QuestId: 34583
+struct quest_for_the_alliance : public QuestScript
+{
+public:
+    quest_for_the_alliance() : QuestScript("quest_for_the_alliance") { }
+
+    void OnQuestObjectiveChange(Player* player, Quest const* quest, QuestObjective const& objective, int32 /*oldAmount*/, int32 /*newAmount*/)
+    { 
+        switch (objective.ID)
+        {
+            case OBJECTIVE_PLANT_ALLIANCE_BANNER:
+                player->CastSpell(nullptr, SPELL_SUMMON_KHADGAR_OPEN_PORTAL, false);
+                break;
+            default:
+                break;
+        }
+    }
+};
+
+enum ArchmageKhadgarLunarFall
+{
+	SPELL_TRANSFOR_COSMETIC_VISUAL           = 135586,
+	SPELL_ARCANE_CHANNELING                  = 32783,
+		
+	SAY_ARCHMAGE_KHADGAR_FIRST_LINE 		 = 0,
+};
+
+/// 82125 - Archmage Khadgar (Lunarfall Pre Garrison)
+class npc_archmage_khadgar_82125 : public CreatureScript
+{
+public:
+	npc_archmage_khadgar_82125() : CreatureScript("npc_archmage_khadgar_82125") {}
+	
+	struct npc_archmage_khadgar_82125AI : public ScriptedAI
+	{
+		npc_archmage_khadgar_82125AI(Creature* creature) : ScriptedAI(creature) { }
+
+        void Reset()
+        {
+            me->AI()->DoAction(ACTION_KHADGAR_SUMMON_PORTAL);
+        }
+
+		void DoAction(int32 const action) override
+		{
+			switch (action)
+			{
+				case ACTION_KHADGAR_SUMMON_PORTAL:
+				{	
+					AddTimedDelayedOperation(0.5 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+					{
+						me->CastSpell(me, SPELL_TRANSFOR_COSMETIC_VISUAL, false);
+					});
+	
+					AddTimedDelayedOperation(2.0 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+					{
+						me->GetMotionMaster()->MovePoint(0, 1946.86f, 334.151f, 88.9551f, false);
+						me->AI()->Talk(SAY_ARCHMAGE_KHADGAR_FIRST_LINE);
+					});
+	
+					AddTimedDelayedOperation(3 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+					{
+						me->CastSpell(me, SPELL_ARCANE_CHANNELING, false);
+					});
+
+                    AddTimedDelayedOperation(3.5 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+                    {
+                        if (Player* player = me->SelectNearestPlayer(50.0f))
+                            player->CastSpell(nullptr, SPELL_SUMMON_PORTAL_EFFECTS_BUNNY, false);
+                    });
+
+                    AddTimedDelayedOperation(7 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+                    {
+                        if (Player* player = me->SelectNearestPlayer(50.0f))
+                            if (Creature * velenLunar = player->FindNearestCreature(NPC_PROPHET_VELEN_LUNARFALL, 80.0f))
+                                velenLunar->AI()->Talk(SAY_PROPHET_VELEN_FIRST);
+                    });
+
+                    AddTimedDelayedOperation(12 * AsUnderlyingType(IN_MILLISECONDS), [this]() -> void
+                    {
+                        if (Player* player = me->SelectNearestPlayer(50.0f))
+                            if (Creature * maraadLunar = player->FindNearestCreature(NPC_VINDICATOR_MARAAD_LUNARFALL, 80.0f))
+                                maraadLunar->AI()->Talk(SAY_VINDICATOR_MARAAD_SECOND);
+                    });
+
+					break;
+				}
+				default:
+					break;
+			}
+		}
+	};
+
+	CreatureAI* GetAI(Creature* creature) const
+	{
+		return new npc_archmage_khadgar_82125AI(creature);
+	}
+};
+
+class npc_baros_pre_garrison : public CreatureScript
+{
+public:
+    npc_baros_pre_garrison() : CreatureScript("npc_baros_pre_garrison") { }
+
+    bool OnGossipHello(Player* player, Creature* creature) override
+    {
+        if (creature->IsQuestGiver())
+            player->PrepareQuestMenu(creature->GetGUID());
+
+        if (player->GetQuestStatus(QUEST_ESTABLISH_YOUR_GARRISON) == QUEST_STATUS_INCOMPLETE)
+            AddGossipItemFor(player, 60002, 1, 0, 0);
+
+        SendGossipMenuFor(player, player->GetGossipTextId(creature), creature->GetGUID());
+        return true;
+    }
+
+    bool OnGossipSelect(Player* player, Creature* /*creature*/, uint32 /*sender*/, uint32 /*action*/) override
+    {
+        Garrison* garrison = player->GetGarrison(GARRISON_TYPE_GARRISON);
+        if (!garrison)
+        {
+            CloseGossipMenuFor(player);
+            player->CreateGarrison(player->IsInAlliance() ? GARRISON_SITE_WOD_ALLIANCE : GARRISON_SITE_WOD_HORDE);
+            player->GetGarrison(GARRISON_TYPE_GARRISON)->ToWodGarrison()->TeleportOwnerAndPlayMovie();
+            player->KilledMonsterCredit(NPC_ESTABLISH_YOUR_GARRISON_KILL_CREDIT);
+        }
+
+        return true;
+    }
+};
+
+// Revendication 169455
+class spell_shadowmoon_claiming : public SpellScriptLoader
+{
+public:
+    spell_shadowmoon_claiming() : SpellScriptLoader("spell_shadowmoon_claiming") { }
+
+    class spell_shadowmoon_claiming_spellscript : public SpellScript
+    {
+        PrepareSpellScript(spell_shadowmoon_claiming_spellscript);
+
+        void HandleDummy(SpellEffIndex /*effIndex*/)
+        {
+            if (!GetCaster())
+                return;
+
+            Player* player = GetCaster()->ToPlayer();
+
+            if (!player)
+                return;
+
+            player->KilledMonsterCredit(NPC_FOR_THE_ALLIANCE_PORTAL_KILL_CREDIT);
+        }
+
+        void Register() override
+        {
+            OnEffectHitTarget += SpellEffectFn(spell_shadowmoon_claiming_spellscript::HandleDummy, EFFECT_0, SPELL_EFFECT_DUMMY);
+        }
+    };
+
+    SpellScript* GetSpellScript() const override
+    {
+        return new spell_shadowmoon_claiming_spellscript();
+    }
+};
+
+// 86213 - Aqualir - Mob rare
+class npc_aqualir : public CreatureScript
+{
+public:
+    npc_aqualir() : CreatureScript("npc_aqualir") { }
+
+    CreatureAI* GetAI(Creature* creature) const override
+    {
+        return new npc_aqualirAI(creature);
+    }
+
+    struct npc_aqualirAI : public ScriptedAI
+    {
+        npc_aqualirAI(Creature* creature) :ScriptedAI(creature), summons(creature) {}
+
+        uint8 binderCount;
+        EventMap events;
+        SummonList summons;
+
+        enum spells
+        {
+            SPELL_AQUATIC_BALL      = 172182,
+            SPELL_SHADOW_BINDING    = 172181,
+
+            SPELL_JETTISON          = 172195,
+            SPELL_SUBMERGE          = 172187,
+            SPELL_WATER_BLAST       = 172186
+
+        };
+
+        enum Events
+        {
+            EVENT_JETTISON      = 1,
+            EVENT_SUBMERGE      = 2,
+            EVENT_WATER_BLAST   = 3
+        };
+
+
+        enum DisplayID
+        {
+            DISPLAYID_AQUATIC_BALL  = 59421,
+            DISPLAYID_ELEMENTARY    = 58879
+        };
+
+        void Reset() override
+        {
+            binderCount = 3;
+
+            summons.DespawnAll();
+
+            me->CastSpell(me, SPELL_AQUATIC_BALL, true);
+            me->SetDisplayId(DISPLAYID_AQUATIC_BALL);
+
+            me->SummonCreature(81542, -870.97f, -1109.27f, 83.38f, 4.824920f, TEMPSUMMON_CORPSE_TIMED_DESPAWN, 2000);
+            me->SummonCreature(81542, -861.96f, -1108.41f, 83.72f, 4.475420f, TEMPSUMMON_CORPSE_TIMED_DESPAWN, 2000);
+            me->SummonCreature(81542, -880.42f, -1110.95f, 83.63f, 5.366850f, TEMPSUMMON_CORPSE_TIMED_DESPAWN, 2000);
+
+            events.ScheduleEvent(EVENT_WATER_BLAST, 5000);
+            events.ScheduleEvent(EVENT_SUBMERGE, urand(13000, 30000));
+            events.ScheduleEvent(EVENT_JETTISON, urand(8000, 18000));
+
+            me->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NON_ATTACKABLE);
+        }
+
+        void JustSummoned(Creature* summon) override
+        {
+            summon->CastSpell(me, SPELL_SHADOW_BINDING, true);
+            summons.Summon(summon);
+        }
+
+        void SummonedCreatureDespawn(Creature* summon) override
+        {
+            --binderCount;
+
+            if (binderCount != 0)
+                return;
+
+            summons.Despawn(summon);
+            me->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NON_ATTACKABLE);
+            me->RemoveAurasDueToSpell(SPELL_AQUATIC_BALL);
+            me->SetDisplayId(DISPLAYID_ELEMENTARY);
+        }
+
+        void UpdateAI(uint32 diff) override
+        {
+            if (!UpdateVictim())
+                return;
+
+            events.Update(diff);
+
+            if (me->HasUnitState(UNIT_STATE_CASTING))
+                return;
+
+            while (uint32 eventId = events.ExecuteEvent())
+            {
+                switch (eventId)
+                {
+                case EVENT_JETTISON:
+                {
+                    if (Unit* victim = me->GetVictim())
+                        me->CastSpell(victim, SPELL_JETTISON, false);
+                    events.ScheduleEvent(EVENT_JETTISON, urand(8000, 18000));
+                    break;
+                }
+
+                case EVENT_SUBMERGE:
+                {
+
+                    me->CastSpell(me, SPELL_SUBMERGE, false);
+                    events.ScheduleEvent(EVENT_SUBMERGE, urand(13000, 30000));
+                    break;
+                }
+
+                case EVENT_WATER_BLAST:
+                {
+                    if (Unit* victim = me->GetVictim())
+                        me->CastSpell(victim, SPELL_WATER_BLAST, false);
+                    events.ScheduleEvent(EVENT_WATER_BLAST, 5000);
+                    break;
+                }
+                }
+            }
+
+            DoMeleeAttackIfReady();
+        }
+
+    };
+};
+
+/// Submerge - 172189
+struct areatrigger_aqualir_submerge : AreaTriggerAI
+{
+    areatrigger_aqualir_submerge(AreaTrigger* areatrigger) : AreaTriggerAI(areatrigger) { }
+
+    Position bottom = { -867.21f, -1133.19f, 81.22f, 1.75f };
+
+    void OnUnitEnter(Unit* unit) override
+    {
+        if (unit->IsPlayer())
+            unit->ApplyMovementForce(at->GetGUID(), 7.0f, bottom);
+    }
+
+    void OnUnitExit(Unit* unit) override
+    {
+        if (unit->IsPlayer())
+            unit->RemoveMovementForce(at->GetGUID());
+    }
+};
+
+//## Gara - suite de qu�tes cach�es chasseur
+
+enum GaraQuestLineEnum
+{
+    //Spells in questline
+    SPELL_TRACKING_QUEST_1  = 177294,   ///> Complete quest 37423
+    SPELL_TRACKING_QUEST_2  = 177295,   ///> Complete quest 37424
+    SPELL_TRACKING_QUEST_3  = 177296 ,  ///> Complete quest 37427
+
+    SPELL_VOID_LANTERN      = 177305,
+    SPELsummon_GARA       = 177298, ///> Summon 88707
+
+    //Creatures
+    NPC_MOTHER_OMRA_BURIAL  = 88709,
+
+    NPC_GARA_BURIAL         = 85645,
+    NPC_GARA_VOID_PET       = 88707,
+    NPC_GARA_TAMABLE_PET    = 88708,
+
+    NPC_XAN                 = 88713,
+
+    NPC_ELDER_VOIDCALLER    = 88711,
+    NPC_ELDER_VOID_LORD     = 88712,
+
+    //Items
+    ITEM_SHADOWBERRY        = 119449,
+
+    //GameObjects
+    GOB_VOIDBLADE = 238853,
+
+    //Gossips
+    TEXT_ID_GARA_GRAVE      = 856451,
+    TEXT_ID_GARA_BERRY      = 856452,
+
+    //Cosmetic Spells
+    SPELL_SOULSTONE_VISUAL  = 95750,
+    SPELL_VOID_EFFECT       = 177303,
+
+    //Soul Effigy events
+    EVENT_SOUL_EFFIGY_01    = 1,
+    EVENT_SOUL_EFFIGY_02,
+    EVENT_SOUL_EFFIGY_03,
+    EVENT_SOUL_EFFIGY_04,
+    EVENT_SOUL_EFFIGY_05,
+    EVENT_SOUL_EFFIGY_06,
+    EVENT_SOUL_EFFIGY_07,
+    EVENT_SOUL_EFFIGY_08,
+    EVENT_SOUL_EFFIGY_END,
+
+    //Gara events
+    EVENT_CHECK_PLAYER      = 1,
+    EVENT_GARA_01,
+    EVENT_GARA_02,
+    EVENT_GARA_03,
+    EVENT_GARA_04,
+    EVENT_GARA_05,
+    EVENT_GARA_06,
+    EVENT_GARA_END,
+
+
+    //Void creatures + Xan events/actions
+    ACTION_SUMMON_XAN       = 2,
+    ACTION_XAN_DEATH        = 3,
+    EVENT_CONSUMING_VOID,
+    EVENT_GRIP_OF_THE_VOID,
+    EVENT_NEGATE,
+    EVENT_SINGULARITY,
+    EVENT_TWIST_REALITY,
+    EVENT_VOID_BOLT,
+
+    //Void creatures + Xan Spells
+    SPELL_VOID_BOLT         = 177639,
+    SPELL_NEGATE            = 171343,
+    SPELL_GRIP_OF_THE_VOID  = 157176,
+    SPELL_TWIST_REALITY     = 171342,
+    SPELL_CONSUMING_VOID    = 177307,
+    SPELL_SINGULARITY       = 171346,
+    SPELL_SINGULARITY_PULL  = 171350,
+};
+
+// 85645 - Gara
+class npc_gara : public CreatureScript
+{
+public:
+    npc_gara() : CreatureScript("npc_gara") { }
+
+    bool OnGossipHello(Player* player, Creature* creature) override
+    {
+        if(player->GetQuestStatus(37423) != QUEST_STATUS_INCOMPLETE && player->GetQuestStatus(37423) != QUEST_STATUS_COMPLETE && player->GetQuestStatus(37423) != QUEST_STATUS_REWARDED)
+            AddGossipItemFor(player, GOSSIP_ICON_CHAT, "(Beast Mastery) Lean down and scratch the wolf behind its ears.", GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF + 1);
+
+        if (player->GetQuestStatus(37423) == QUEST_STATUS_REWARDED && player->GetQuestStatus(37424) != QUEST_STATUS_REWARDED && player->HasItemCount(ITEM_SHADOWBERRY, 1))
+            AddGossipItemFor(player, GOSSIP_ICON_CHAT, "(Beast Mastery) Show Gara the Shadowberries.", GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF + 2);
+
+        player->PlayerTalkClass->SendGossipMenu(85645, creature->GetGUID());
+
+        return true;
+    }
+
+    bool OnGossipSelect(Player * player, Creature * creature, uint32 /*p_Sender*/, uint32 action) override
+    {
+        if (player->getClass() != CLASS_HUNTER || player->GetSpecializationId() != TALENT_SPEC_HUNTER_BEASTMASTER)
+            return false;
+
+        player->PlayerTalkClass->ClearMenus();
+        if (action == GOSSIP_ACTION_INFO_DEF + 1)
+        {
+            SendGossipMenuFor(player, TEXT_ID_GARA_GRAVE, creature->GetGUID());
+            player->CastSpell(player, SPELL_TRACKING_QUEST_1);
+        }
+        if (action == GOSSIP_ACTION_INFO_DEF + 2)
+        {
+            SendGossipMenuFor(player, TEXT_ID_GARA_BERRY, creature->GetGUID());
+            player->CastSpell(player, SPELL_TRACKING_QUEST_2);
+        }
+        return true;
+    }
+
+};
+
+// 177301 - Use Effigy
+class spell_use_effigy : public SpellScriptLoader
+{
+public:
+    spell_use_effigy() : SpellScriptLoader("spell_use_effigy") { }
+
+    class spell_use_effigy_SpellScript : public SpellScript
+    {
+        PrepareSpellScript(spell_use_effigy_SpellScript);
+
+        SpellCastResult CheckCast()
+        {
+            if (Unit *unt = GetCaster())
+                if (Player *player = unt->ToPlayer())
+                    if (player->GetQuestStatus(37426) != QUEST_STATUS_REWARDED || player->IsGameMaster())
+                        if (player->GetQuestStatus(37425) == QUEST_STATUS_REWARDED || player->IsGameMaster())
+                    return SPELL_CAST_OK;
+
+            return SPELL_FAILED_SPELL_UNAVAILABLE;
+        }
+
+        void Register() override
+        {
+            OnCheckCast += SpellCheckCastFn(spell_use_effigy_SpellScript::CheckCast);
+        }
+    };
+
+    SpellScript* GetSpellScript() const override
+    {
+        return new spell_use_effigy_SpellScript();
+    }
+};
+
+Position BurialEventPos[] =
+{
+    { -300.479309f, -754.269653f, 16.830910f, 0.251439f }, //Om'ra summon
+    { -287.301636f, -751.508606f, 16.896639f, 0.223946f }, //Om'ra WP
+    { -285.411957f, -753.524963f, 16.823908f, 5.360457f }, //Om'ra kneel
+    { -280.977783f, -763.287170f, 16.710634f, 1.995033f }  //Xan summon
+};
+
+#define SAY_OMRA_01 "My soul... rest in peace... thanks."
+#define SAY_OMRA_02 "Gara was my wolf, back before we forsook shamanism for these... dark magics. She wouldn't even look at me, not after I was tainted by the Void."
+#define SAY_OMRA_03 "The Lord of Glass, a void god who calls himself Xan, had taken my soul captive in the void realm. Fragments of it were... torn away... for use by the Shadowmoon here in the burial grounds."
+#define SAY_OMRA_04 "But Gara didn't wanted to leave me. Not until the right effigy has been burnt, and my soul appeased."
+#define SAY_OMRA_05 "Thank you to deliver us."
+#define SAY_XAN_01  "How dare you set her soul at rest. Om'ra's soul belongs to the VOID!"
+#define SAY_XAN_02  "I shall take this one as compensation!"
+
+// 237944 - Spirit Effigy
+class go_spirit_effigy : public GameObjectScript
+{
+public:
+    go_spirit_effigy() : GameObjectScript("go_spirit_effigy") { }
+
+    struct go_spirit_effigyAI : public GameObjectAI
+    {
+        go_spirit_effigyAI(GameObject* go) : GameObjectAI(go)
+        {
+            events.ScheduleEvent(EVENT_SOUL_EFFIGY_01, 0);
+        }
+
+        ObjectGuid omraGuid;
+        ObjectGuid xanGuid;
+
+        TempSummon* GetOmra()
+        {
+            if (Creature* omra = ObjectAccessor::GetCreature(*go, omraGuid))
+                return omra->ToTempSummon();
+
+            return nullptr;
+        }
+
+        TempSummon* GetXan()
+        {
+            if (Creature* xan = ObjectAccessor::GetCreature(*go, xanGuid))
+                return xan->ToTempSummon();
+
+            return nullptr;
+        }
+
+        void UpdateAI(uint32 diff) override
+        {
+            events.Update(diff);
+
+            while (uint32 eventId = events.ExecuteEvent())
+            {
+                switch (eventId)
+                {
+                    case EVENT_SOUL_EFFIGY_01:
+                    {
+                        if (Creature* gara = go->FindNearestCreature(NPC_GARA_BURIAL, 15, false))
+                            gara->Respawn();
+
+                        if (TempSummon* Omra = go->SummonCreature(NPC_MOTHER_OMRA_BURIAL, BurialEventPos[0], TEMPSUMMON_MANUAL_DESPAWN))
+                        {
+                            omraGuid = Omra->GetGUID();
+                            Omra->CastSpell(Omra, SPELL_SOULSTONE_VISUAL);
+                            Omra->SetSpeed(MOVE_WALK, 0.4f);
+                            Omra->SetSpeed(MOVE_RUN, 0.4f);
+                            Omra->GetMotionMaster()->MovePoint(1, BurialEventPos[1], true);
+                        }
+                        events.ScheduleEvent(EVENT_SOUL_EFFIGY_02, 4.5 * AsUnderlyingType(IN_MILLISECONDS));
+
+                        break;
+                    }
+                    case EVENT_SOUL_EFFIGY_02:
+                    {
+                        if (TempSummon* Omra = GetOmra())
+                        {
+                            Omra->Say(SAY_OMRA_01, LANG_UNIVERSAL, Omra);
+                            Omra->GetMotionMaster()->MovePoint(1, BurialEventPos[2], true);
+                        }
+                        events.ScheduleEvent(EVENT_SOUL_EFFIGY_03, 4 * IN_MILLISECONDS);
+
+                        break;
+                    }
+                    case EVENT_SOUL_EFFIGY_03:
+                    {
+                        if (TempSummon* Omra = GetOmra())
+                        {
+                            Omra->Say(SAY_OMRA_02, LANG_UNIVERSAL, Omra);
+                            Omra->HandleEmoteCommand(16 /*EMOTE_ONESHOT_KNEEL*/);
+                        }
+
+                        events.ScheduleEvent(EVENT_SOUL_EFFIGY_04, 8 * IN_MILLISECONDS);
+
+                        break;
+                    }
+                    case EVENT_SOUL_EFFIGY_04:
+                    {
+                        if (TempSummon* Omra = GetOmra())
+                            Omra->Say(SAY_OMRA_03, LANG_UNIVERSAL, Omra);
+
+                        events.ScheduleEvent(EVENT_SOUL_EFFIGY_05, 11 * IN_MILLISECONDS);
+
+                        break;
+                    }
+                    case EVENT_SOUL_EFFIGY_05:
+                    {
+                        if (TempSummon* Omra = GetOmra())
+                            Omra->Say(SAY_OMRA_04, LANG_UNIVERSAL, Omra);
+
+                        events.ScheduleEvent(EVENT_SOUL_EFFIGY_06, 7.5 * AsUnderlyingType(IN_MILLISECONDS));
+
+                        break;
+                    }
+                    case EVENT_SOUL_EFFIGY_06:
+                    {
+                        if (TempSummon* Omra = GetOmra())
+                        {
+                            Omra->Say(SAY_OMRA_05, LANG_UNIVERSAL, Omra);
+                            Omra->CastSpell(Omra, SPELL_SOULSTONE_VISUAL);
+                        }
+                        events.ScheduleEvent(EVENT_SOUL_EFFIGY_07, 2 * IN_MILLISECONDS);
+                        if (TempSummon* Xan = go->SummonCreature(NPC_XAN, BurialEventPos[3], TEMPSUMMON_MANUAL_DESPAWN))
+                        {
+                            xanGuid = Xan->GetGUID();
+                            Xan->SetReactState(REACT_PASSIVE);
+                            Xan->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NOT_SELECTABLE | UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_IMMUNE_TO_PC);
+                        }
+
+                        break;
+                    }
+                    case EVENT_SOUL_EFFIGY_07:
+                    {
+                        if (TempSummon* Omra = GetOmra())
+                            Omra->DisappearAndDie();
+
+                        if (TempSummon* Xan = GetXan())
+                            Xan->Say(SAY_XAN_01, LANG_UNIVERSAL, Xan);
+
+                        events.ScheduleEvent(EVENT_SOUL_EFFIGY_08, 6 * IN_MILLISECONDS);
+
+                        break;
+                    }
+                    case EVENT_SOUL_EFFIGY_08:
+                    {
+                        if (TempSummon* Xan = GetXan())
+                            Xan->Say(SAY_XAN_02, LANG_UNIVERSAL, Xan);
+
+                        if (Creature* gara = go->FindNearestCreature(NPC_GARA_BURIAL, 15, true))
+                            gara->CastSpell(gara, SPELL_VOID_EFFECT);
+                        events.ScheduleEvent(EVENT_SOUL_EFFIGY_END, 4 * IN_MILLISECONDS);
+
+                        break;
+                    }
+                    case EVENT_SOUL_EFFIGY_END:
+                    {
+                        if (Creature* gara = go->FindNearestCreature(NPC_GARA_BURIAL, 15))
+                        {
+                            gara->TextEmote("Gara slowly disappear into the void.", gara);
+                            gara->RemoveAllAuras();
+                            gara->DisappearAndDie();
+                        }
+
+                        if (TempSummon* Xan = GetXan())
+                            Xan->DisappearAndDie();
+
+                        break;
+                    }
+                }
+            }
+        }
+        EventMap events;
+    };
+
+    GameObjectAI* GetAI(GameObject* go) const override
+    {
+        return new go_spirit_effigyAI(go);
+    }
+};
+
+// 238853 - Shadowmoon Voidblade
+class go_shadowmoon_voidblade : public GameObjectScript
+{
+public:
+    go_shadowmoon_voidblade() : GameObjectScript("go_shadowmoon_voidblade") { }
+
+    bool OnGossipHello(Player* player, GameObject* /*go*/) override
+    {
+        if ((player->HasAura(SPELL_VOID_LANTERN) && player->GetQuestStatus(37426) == QUEST_STATUS_REWARDED) || player->GetQuestStatus(37427) == QUEST_STATUS_REWARDED)
+            if(player->getClass() == CLASS_HUNTER && player->GetSpecializationId() == TALENT_SPEC_HUNTER_BEASTMASTER)
+            player->CastSpell(player, SPELL_TRACKING_QUEST_3);
+
+        CloseGossipMenuFor(player);
+        return true;
+    }
+};
+
+// 177297 - Void Realm
+class spell_aura_void_realm : public SpellScriptLoader
+{
+public:
+    spell_aura_void_realm() : SpellScriptLoader("spell_aura_void_realm") { }
+
+    class spell_aura_void_realm_AuraScript : public AuraScript
+    {
+        PrepareAuraScript(spell_aura_void_realm_AuraScript);
+
+        void HandlePhasing(AuraEffect const* /*aurEff*/, AuraEffectHandleModes /*mode*/)
+        {
+            if (!GetCaster()->IsPlayer())
+                return;
+
+            PhasingHandler::AddPhase(GetCaster(), 8);
+            GetCaster()->SummonCreature(NPC_GARA_VOID_PET, GetCaster()->GetPosition());
+        }
+
+        void HandlePhasingRemove(AuraEffect const* /*aurEff*/, AuraEffectHandleModes /*mode*/)
+        {
+            if (!GetCaster()->IsPlayer())
+                return;
+            PhasingHandler::RemovePhase(GetCaster(), 8);
+        }
+
+        void Register() override
+        {
+            OnEffectApply += AuraEffectApplyFn(spell_aura_void_realm_AuraScript::HandlePhasing, EFFECT_0, SPELL_AURA_PHASE, AURA_EFFECT_HANDLE_REAL);
+            OnEffectRemove += AuraEffectRemoveFn(spell_aura_void_realm_AuraScript::HandlePhasingRemove, EFFECT_0, SPELL_AURA_PHASE, AURA_EFFECT_HANDLE_REAL);
+        }
+    };
+
+    AuraScript* GetAuraScript() const override
+    {
+        return new spell_aura_void_realm_AuraScript();
+    }
+};
+
+Position VoidRealmEventPos[] =
+{
+    { 932.043701f, -1835.089600f,  0.966880f, 1.500073f }, //Xan Summon
+    { 930.837952f, -1810.070801f, -0.442225f, 1.683415f }, //Gara end of path
+    { 942.078857f, -1802.449097f,  0.316170f, 3.808706f }, //Om'ra summon
+    { 934.591187f, -1808.346069f, -0.136876f, 3.808706f }, //Om'ra way
+};
+
+#define SAY_OMRA_11 "She is being swallowed by the void! You must help her! There is only one way, tame her, now! Maybe you can find a way to reverse the process, and put her soul at rest, as you have done mine !"
+#define SAY_OMRA_12 "You've done it... thank you. Goodbye, Gara, my soul is at peace now. I hope... that you find this peace some day, too. I am so sorry, my dearest Gara."
+
+// 88707 - Gara invoqu�e dans le vide
+class npc_void_gara : public CreatureScript
+{
+public:
+    npc_void_gara() : CreatureScript("npc_void_gara") { }
+
+    struct npc_void_garaAI : public ScriptedAI
+    {
+        npc_void_garaAI(Creature* creature) : ScriptedAI(creature)
+        {
+            owner           = creature->SelectNearestPlayer(10);
+            Omra            = nullptr;
+            gara_teamable   = nullptr;
+
+            if (owner != nullptr)
+                events.ScheduleEvent(EVENT_CHECK_PLAYER, 0);
+            else
+                creature->DisappearAndDie();
+        }
+
+        EventMap events;
+        Player* owner;
+        TempSummon* Omra;
+        TempSummon* gara_teamable;
+
+        void Reset() override
+        {
+            owner = nullptr;
+            Omra = nullptr;
+            gara_teamable = nullptr;
+        }
+
+        void DoAction(int32 action) override
+        {
+            if (action == ACTION_SUMMON_XAN)
+                events.ScheduleEvent(EVENT_GARA_01, 0);
+            else if (action == ACTION_XAN_DEATH)
+                events.ScheduleEvent(EVENT_GARA_02, 0);
+        }
+
+        void UpdateAI(uint32 diff) override
+        {
+            events.Update(diff);
+
+            while (uint32 eventId = events.ExecuteEvent())
+            {
+                switch (eventId)
+                {
+                    case EVENT_CHECK_PLAYER:
+                    {
+                        if (owner && owner->IsInWorld())
+                        {
+                            if (owner->HasAura(177297))
+                                me->GetMotionMaster()->MoveFollow(owner, 2, (float)M_PI);
+                            else me->DisappearAndDie();
+                        }
+                        else me->DisappearAndDie();
+
+                        events.ScheduleEvent(EVENT_CHECK_PLAYER, 1000);
+                    }
+                    break;
+                    case EVENT_GARA_01:
+                    {
+                        if (TempSummon* Xan = me->SummonCreature(NPC_XAN, VoidRealmEventPos[0], TEMPSUMMON_TIMED_OR_DEAD_DESPAWN, 60 * 60 * IN_MILLISECONDS))
+                        {
+                            Xan->SetFaction(14);
+                            Xan->SetReactState(REACT_AGGRESSIVE);
+                        }
+                    }
+                        break;
+                    case EVENT_GARA_02:
+                    {
+                        events.CancelEvent(EVENT_CHECK_PLAYER);
+                        me->GetMotionMaster()->MovePoint(2, VoidRealmEventPos[1], true);
+                        me->CastSpell(me, SPELL_VOID_EFFECT);
+                        events.ScheduleEvent(EVENT_GARA_03, 10 * IN_MILLISECONDS);
+                    }
+                        break;
+                    case EVENT_GARA_03:
+                    {
+                        Omra = me->SummonCreature(NPC_MOTHER_OMRA_BURIAL, VoidRealmEventPos[2], TEMPSUMMON_MANUAL_DESPAWN);
+                        if (Omra)
+                        {
+                            Omra->CastSpell(Omra, SPELL_SOULSTONE_VISUAL);
+                            Omra->SetSpeed(MOVE_WALK, 0.4f);
+                            Omra->SetSpeed(MOVE_RUN, 0.4f);
+                            Omra->GetMotionMaster()->MovePoint(1, VoidRealmEventPos[3], true);
+                            Omra->Say(SAY_OMRA_11, LANG_UNIVERSAL, Omra);
+                        }
+                        me->RemoveAllAuras();
+                        me->SetVisible(false);
+                        gara_teamable = me->SummonCreature(NPC_GARA_TAMABLE_PET, me->GetPosition(), TEMPSUMMON_TIMED_OR_DEAD_DESPAWN, 30000);
+
+                        if(gara_teamable)
+                            gara_teamable->SetHealth(gara_teamable->GetHealth() * 60000);
+
+                        events.ScheduleEvent(EVENT_GARA_04, 0);
+                    }
+                        break;
+                    case EVENT_GARA_04:
+                    {
+                        if (!gara_teamable)
+                            return;
+
+                        if (gara_teamable->IsInCombat())
+                            events.ScheduleEvent(EVENT_GARA_05, 2 * IN_MILLISECONDS);
+                        else events.ScheduleEvent(EVENT_GARA_04, 300);
+                    }
+                        break;
+                    case EVENT_GARA_05:
+                    {
+                        if (Omra)
+                            Omra->Say(SAY_OMRA_12, LANG_UNIVERSAL, Omra);
+
+                        events.ScheduleEvent(EVENT_GARA_06, 11 * IN_MILLISECONDS);
+                    }
+                        break;
+                    case EVENT_GARA_06:
+                    {
+                        if (Omra)
+                            Omra->CastSpell(Omra, SPELL_SOULSTONE_VISUAL);
+
+                        events.ScheduleEvent(EVENT_GARA_END, 1 * IN_MILLISECONDS);
+                    }
+                        break;
+                    case EVENT_GARA_END:
+                    {
+                        me->DisappearAndDie();
+
+                        if (Omra)
+                            Omra->DisappearAndDie();
+                    }
+                    break;
+                }
+            }
+        }
+    };
+
+    CreatureAI* GetAI(Creature* creature) const override
+    {
+        return new npc_void_garaAI(creature);
+    }
+};
+
+// Void Creatures: 88711 - Elder Voidcaller // 88712 - Elder Void Lord
+class npc_gara_void_creature : public CreatureScript
+{
+public:
+    npc_gara_void_creature() : CreatureScript("npc_gara_void_creature") { }
+
+    struct npc_gara_void_creatureAI : public ScriptedAI
+    {
+        npc_gara_void_creatureAI(Creature* creature) : ScriptedAI(creature) {}
+
+        EventMap events;
+
+        void JustDied(Unit* killer) override
+        {
+            //roll the chance to trigger the final Xan event
+            if (Creature* gara = killer->FindNearestCreature(NPC_GARA_VOID_PET, 50, true))
+                if (roll_chance_i(33))
+                    gara->GetAI()->DoAction(ACTION_SUMMON_XAN);
+        }
+
+        void EnterCombat(Unit* /*who*/) override
+        {
+            events.Reset();
+
+            if (me->GetEntry() == NPC_ELDER_VOIDCALLER)
+            {
+                events.ScheduleEvent(EVENT_NEGATE, urand(30, 40) * IN_MILLISECONDS);
+                events.ScheduleEvent(EVENT_TWIST_REALITY, urand(2, 10) * IN_MILLISECONDS);
+                events.ScheduleEvent(EVENT_VOID_BOLT, urand(2, 5) * IN_MILLISECONDS);
+            }
+            else
+            {
+                events.ScheduleEvent(EVENT_CONSUMING_VOID, urand(40, 60) * IN_MILLISECONDS);
+                events.ScheduleEvent(EVENT_GRIP_OF_THE_VOID, urand(10, 20) * IN_MILLISECONDS);
+                events.ScheduleEvent(EVENT_SINGULARITY, urand(5, 15) * IN_MILLISECONDS);
+            }
+        }
+
+        void UpdateAI(uint32 diff) override
+        {
+            if (!UpdateVictim())
+                return;
+
+            events.Update(diff);
+
+            if (me->HasUnitState(UNIT_STATE_CASTING))
+                return;
+
+            while (uint32 eventId = events.ExecuteEvent())
+            {
+                switch (eventId)
+                {
+                    case EVENT_CONSUMING_VOID:
+                    {
+                        if (Unit* victim = SelectTarget(SELECT_TARGET_TOPAGGRO, 0, 100.0f, true))
+                            me->CastSpell(victim, SPELL_CONSUMING_VOID);
+
+                        events.ScheduleEvent(EVENT_CONSUMING_VOID, urand(40, 60) * IN_MILLISECONDS);
+                        break;
+                    }
+                    case EVENT_GRIP_OF_THE_VOID:
+                    {
+                        if (Unit* victim = SelectTarget(SELECT_TARGET_TOPAGGRO, 0, 50.0f, true))
+                            me->CastSpell(victim, SPELL_GRIP_OF_THE_VOID);
+
+                        events.ScheduleEvent(EVENT_GRIP_OF_THE_VOID, urand(20, 30) * IN_MILLISECONDS);
+                        break;
+                    }
+                    case EVENT_NEGATE:
+                    {
+                        if (Unit* victim = SelectTarget(SELECT_TARGET_TOPAGGRO, 0, 10.0f, true))
+                            me->CastSpell(victim, SPELL_NEGATE);
+
+                        events.ScheduleEvent(EVENT_NEGATE, urand(10, 25) * IN_MILLISECONDS);
+                        break;
+                    }
+                    case EVENT_SINGULARITY:
+                    {
+                        DoCast(SPELL_SINGULARITY);
+
+                        std::list<Player *> players; me->GetPlayerListInGrid(players, 45);
+
+                        for (auto player : players)
+                            player->CastSpell(me, SPELL_SINGULARITY_PULL);
+
+                        events.ScheduleEvent(EVENT_SINGULARITY, urand(5, 15) * IN_MILLISECONDS);
+                        break;
+                    }
+                    case EVENT_TWIST_REALITY:
+                    {
+                        DoCast(SPELL_TWIST_REALITY);
+                        events.ScheduleEvent(EVENT_TWIST_REALITY, urand(2, 6) * IN_MILLISECONDS);
+                        break;
+                    }
+                    case EVENT_VOID_BOLT:
+                    {
+                        if (Unit* victim = SelectTarget(SELECT_TARGET_TOPAGGRO, 0, 40.0f))
+                            me->CastSpell(victim, SPELL_VOID_BOLT);
+
+                        events.ScheduleEvent(EVENT_VOID_BOLT, urand(2, 6) * IN_MILLISECONDS);
+                        break;
+                    }
+                }
+            }
+
+            DoMeleeAttackIfReady();
+        }
+    };
+
+    CreatureAI* GetAI(Creature* creature) const override
+    {
+        return new npc_gara_void_creatureAI(creature);
+    }
+};
+
+// 88713 - Xan
+class npc_xan_void_realm : public CreatureScript
+{
+public:
+    npc_xan_void_realm() : CreatureScript("npc_xan_void_realm") { }
+
+    struct npc_xan_void_realmAI : public ScriptedAI
+    {
+        npc_xan_void_realmAI(Creature* creature) : ScriptedAI(creature) {}
+
+        EventMap events;
+
+        void JustDied(Unit* killer) override
+        {
+            if (Creature* gara = killer->FindNearestCreature(NPC_GARA_VOID_PET, 50, true))
+                gara->GetAI()->DoAction(ACTION_XAN_DEATH);
+        }
+
+        void EnterCombat(Unit* /*who*/) override
+        {
+            events.ScheduleEvent(EVENT_CONSUMING_VOID, urand(40, 60) * IN_MILLISECONDS);
+            events.ScheduleEvent(EVENT_GRIP_OF_THE_VOID, urand(10, 20) * IN_MILLISECONDS);
+            events.ScheduleEvent(EVENT_NEGATE, urand(5, 10) * IN_MILLISECONDS);
+            events.ScheduleEvent(EVENT_SINGULARITY, urand(15, 30) * IN_MILLISECONDS);
+            events.ScheduleEvent(EVENT_TWIST_REALITY, urand(5, 10) * IN_MILLISECONDS);
+            events.ScheduleEvent(EVENT_VOID_BOLT, urand(2, 5) * IN_MILLISECONDS);
+        }
+
+        void UpdateAI(uint32 diff) override
+        {
+            if (!UpdateVictim())
+                return;
+
+            events.Update(diff);
+
+            if (me->HasUnitState(UNIT_STATE_CASTING))
+                return;
+
+            while (uint32 eventId = events.ExecuteEvent())
+            {
+                switch (eventId)
+                {
+                    case EVENT_CONSUMING_VOID:
+                    {
+                        if (Unit* victim = SelectTarget(SELECT_TARGET_TOPAGGRO, 0, 100.0f, true))
+                            me->CastSpell(victim, SPELL_CONSUMING_VOID);
+
+                        events.ScheduleEvent(EVENT_CONSUMING_VOID, urand(40, 60) * IN_MILLISECONDS);
+                        break;
+                    }
+                    case EVENT_GRIP_OF_THE_VOID:
+                    {
+                        if (Unit* victim = SelectTarget(SELECT_TARGET_TOPAGGRO, 0, 50.0f, true))
+                            me->CastSpell(victim, SPELL_GRIP_OF_THE_VOID);
+
+                        events.ScheduleEvent(EVENT_GRIP_OF_THE_VOID, urand(30, 35) * IN_MILLISECONDS);
+                        break;
+                    }
+                    case EVENT_NEGATE:
+                    {
+                        if (Unit* victim = SelectTarget(SELECT_TARGET_TOPAGGRO, 0, 10.0f, true))
+                            me->CastSpell(victim, SPELL_NEGATE);
+
+                        events.ScheduleEvent(EVENT_NEGATE, urand(20, 25) * IN_MILLISECONDS);
+                        break;
+                    }
+                    case EVENT_SINGULARITY:
+                    {
+                        DoCast(SPELL_SINGULARITY);
+
+                        std::list<Player *> players; me->GetPlayerListInGrid(players, 45);
+
+                        for (auto player : players)
+                            player->CastSpell(me, SPELL_SINGULARITY_PULL);
+
+                        events.ScheduleEvent(EVENT_SINGULARITY, urand(15, 40) * IN_MILLISECONDS);
+                        break;
+                    }
+                    case EVENT_TWIST_REALITY:
+                    {
+                        DoCast(SPELL_TWIST_REALITY);
+                        events.ScheduleEvent(EVENT_TWIST_REALITY, urand(2, 9) * IN_MILLISECONDS);
+                        break;
+                    }
+                    case EVENT_VOID_BOLT:
+                    {
+                        if (Unit* victim = SelectTarget(SELECT_TARGET_TOPAGGRO, 0, 40.0f))
+                            me->CastSpell(victim, SPELL_VOID_BOLT);
+
+                        events.ScheduleEvent(EVENT_VOID_BOLT, urand(2, 5) * IN_MILLISECONDS);
+                        break;
+                    }
+                }
+            }
+
+            DoMeleeAttackIfReady();
+        }
+    };
+
+    CreatureAI* GetAI(Creature* creature) const override
+    {
+        return new npc_xan_void_realmAI(creature);
+    }
+};
+
+void AddSC_shadowmoon_draenor()
+{
+    // Eventide
+    new quest_finding_a_foothold();
+    new npc_prophet_velen_79635();
+    new npc_yrel_79656();
+    new npc_vindicator_maraad_79655();
+    new npc_archmage_khadgar_79657();
+    // Lunarfall
+    new quest_for_the_alliance();
+    new npc_archmage_khadgar_82125();
+
+    new npc_baros_pre_garrison();
+    new npc_aqualir();
+
+    new spell_shadowmoon_claiming();
+
+    RegisterAreaTriggerAI(areatrigger_aqualir_submerge);
+
+    new npc_gara();
+    new spell_use_effigy();
+    new go_spirit_effigy();
+    new go_shadowmoon_voidblade();
+    new spell_aura_void_realm();
+    new npc_void_gara();
+    new npc_gara_void_creature();
+    new npc_xan_void_realm();
+}

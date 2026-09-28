@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  * Copyright (C) 2005-2009 MaNGOS <http://getmangos.com/>
  *
@@ -919,7 +919,7 @@ void Map::ScriptsProcess()
                 break;
 
             case SCRIPT_COMMAND_SEND_SCENARIO_EVENT:
-                // Legion-Server round 50: bridge for the reference core event_scripts command 39, used by client
+                // Legion-Server round 50: bridge for LegionCore event_scripts command 39, used by client
                 // SEND_EVENT spells (e.g. scenario 1038 "A Ring Unbroken") to advance InstanceScenario steps.
                 if (Player* player = _GetScriptPlayerSourceOrTarget(source, target, step.script))
                     if (Scenario* scenario = player->GetScenario())

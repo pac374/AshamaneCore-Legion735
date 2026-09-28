@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -15,13 +15,14 @@
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
-// Legion-Server round "LCF2" (2026-09-25): artifact abilities / traits whose behaviour was checked against
-// an external reference implementation and against SimulationCraft legion-dev 7742eb6 (GPL). Only the MECHANIC was
-// taken over (which spell triggers which, on whom, when); the code is our own and every number comes from our client
+// Legion-Server round "LCF2" (2026-09-25): artifact abilities / traits whose behaviour was taken from
+// LegionCore-7.3.5 (github.com/The-Legion-Preservation-Project/LegionCore-7.3.5, derived from the UWOW 2020 leak -
+// used with explicit user permission) and from SimulationCraft legion-dev 7742eb6 (GPL). Only the MECHANIC was taken
+// over (which spell triggers which, on whom, when); the code is our own and every number comes from our client
 // 7.3.5.26972 (SpellEffect/SpellAuraOptions/SpellDescriptionVariables) unless a comment names another source.
 //
-// Reference tables used for comparison:
-//   DB (reference schema):  spell_linked_spell, spell_aura_trigger, spell_dummy_trigger, spell_trigger,
+// LegionCore sources used (local sparse clone C:\LegionServer\downloads\lc_src\repo, commit of 2024-10):
+//   DB (schema legioncore_full):  spell_linked_spell, spell_aura_trigger, spell_dummy_trigger, spell_trigger,
 //                                 spell_pet_auras, spell_target_filter, spell_proc_event, spell_proc_check,
 //                                 areatrigger_data/actions
 //   code: SpellAuraEffects.cpp AuraSpellTrigger (aura_trigger option 0 = cast on tick), Spell.cpp linked actions
@@ -162,7 +163,7 @@ namespace
         NPC_VOID_TENDRIL                = 98167
     };
 
-    // Doom Wolf models (creature_template 100820 modelid1..3). Element per model from the reference core spell_shaman.cpp
+    // Doom Wolf models (creature_template 100820 modelid1..3). Element per model from LegionCore spell_shaman.cpp
     // spell_sha_alpha_wolf (66843 -> Fire Nova, 66844 -> Snowstorm, 66845 -> Thunder Bite); SimulationCraft
     // sc_shaman.cpp pairs the same Alpha Wolf spells with fire/frost/lightning wolves.
     enum Lcf2WolfModels : uint32
@@ -217,7 +218,7 @@ namespace
 // ============================================================================================================
 // Mage: Mark of Aluneth (224968) - the artifact ability did nothing (aura 226 PERIODIC_DUMMY without handler), so
 // Aluneth's Avarice (238090, gated on 211076 E1) could never fire either.
-// the reference core: spell_aura_trigger 224968 -> 211088 option 0 (cast on every tick, caster = aura caster, target = aura
+// LegionCore: spell_aura_trigger 224968 -> 211088 option 0 (cast on every tick, caster = aura caster, target = aura
 // owner); spell_linked_spell -224968 -> 211076 (cast on removal; SpellAuras.cpp skips removal by death when
 // removeMask is 0); SpellEffects.cpp adds 224968 E0 % of max mana to 211076's damage.
 // Client: 224968 "inflicting ${$211088s1*6} Arcane damage over $d ... then detonating for Arcane damage equal to
@@ -255,7 +256,7 @@ class spell_lcf2_mage_mark_of_aluneth : public AuraScript
 };
 
 // 211076 - Mark of Aluneth (detonation): E0 BP 1 + 224968 E0 % of the mage's maximum mana, added before the damage
-// bonus pipeline (same place the reference core adds it).
+// bonus pipeline (same place LegionCore adds it).
 class spell_lcf2_mage_mark_of_aluneth_detonation : public SpellScript
 {
     PrepareSpellScript(spell_lcf2_mage_mark_of_aluneth_detonation);
@@ -277,8 +278,8 @@ class spell_lcf2_mage_mark_of_aluneth_detonation : public SpellScript
 
 // ============================================================================================================
 // Paladin: Judge Unworthy (238134) "When you deal damage to a target afflicted by Judgment, it has a $s1% chance to
-// spread to a nearby target." the reference core Unit.cpp (proc of SPELL_AURA_MOD_DAMAGE_FROM_CASTER, aura 197277): roll
-// 238134 E0, pick an enemy within 8 yd of the judged target (8 yd is the reference core's value, the client has none) that is
+// spread to a nearby target." LegionCore Unit.cpp (proc of SPELL_AURA_MOD_DAMAGE_FROM_CASTER, aura 197277): roll
+// 238134 E0, pick an enemy within 8 yd of the judged target (8 yd is LegionCore's value, the client has none) that is
 // in line of sight of the paladin and not already judged, give it 197277 with the remaining duration.
 // Our core already generates the proc entry for 197277 (aura 271 is a trigger aura, client ProcTypeMask 664232) and
 // only lets it proc for the aura caster (AuraEffect::CheckEffectProc).
@@ -287,7 +288,7 @@ class spell_lcf2_pal_judge_unworthy : public AuraScript
 {
     PrepareAuraScript(spell_lcf2_pal_judge_unworthy);
 
-    static constexpr float SPREAD_RANGE = 8.0f; // the reference core Unit.cpp GetAttackableUnitListInRange(targetList, 8.f)
+    static constexpr float SPREAD_RANGE = 8.0f; // LegionCore Unit.cpp GetAttackableUnitListInRange(targetList, 8.f)
 
     void HandleProc(AuraEffect const* aurEff, ProcEventInfo& /*eventInfo*/)
     {
@@ -342,7 +343,7 @@ class spell_lcf2_pal_judge_unworthy : public AuraScript
 
 // ============================================================================================================
 // Hunter: Titan's Thunder (207068, artifact ability) - nothing of it was implemented.
-// Chain (the reference core): 207068 E0 triggers 207081 (client); 207081 area ally search is filtered to units owned by the
+// Chain (LegionCore): 207068 E0 triggers 207081 (client); 207081 area ally search is filtered to units owned by the
 // hunter (spell_target_filter option 21 SPELL_FILTER_BY_OWNER) and its dummy casts 207094 on them
 // (spell_dummy_trigger option 5); 207094 ticks (1 s, client) make the pet cast 207097 at its victim
 // (spell_hun_titans_thunder, SimC titans_thunder_tick uses the pet's melee target as well).
@@ -449,9 +450,9 @@ class spell_lcf2_hun_dire_frenzy_titans_thunder : public SpellScript
 // ============================================================================================================
 // Hunter: Multi-Shot (2643) - second script. Two artifact effects hang on it:
 //  - Surge of the Stormgod (197354): client proc chance 25; SimulationCraft sc_hunter.cpp rolls it once per
-//    Multi-Shot execute and fires once for the pet and once for Hati; the reference core Unit.cpp casts 197465 on the pet and
+//    Multi-Shot execute and fires once for the pet and once for Hati; LegionCore Unit.cpp casts 197465 on the pet and
 //    on Hati with bp = ranged AP * 2 (client tooltip "${$RAP*2}"); 197465 = DEST_TARGET_ALLY + enemies around it.
-//  - Master of Beasts (197248) "Hati also benefits from ... Beast Cleave": 118455 also on Hati (the reference core
+//  - Master of Beasts (197248) "Hati also benefits from ... Beast Cleave": 118455 also on Hati (LegionCore
 //    spell_hun_beast_cleave_tgr, SimC multi_shot execute).
 // ============================================================================================================
 class spell_lcf2_hun_multi_shot_titanstrike : public SpellScript
@@ -491,7 +492,7 @@ class spell_lcf2_hun_multi_shot_titanstrike : public SpellScript
 
 // 34026 - Kill Command (second script): Master of Beasts "... and deals damage from Kill Command" - Hati casts the
 // damage spell 83381 (whose damage script computes from the hunter) and charges if not in melee range
-// (the reference core spell_hun_kill_command HandleDummy).
+// (LegionCore spell_hun_kill_command HandleDummy).
 class spell_lcf2_hun_kill_command_hati : public SpellScript
 {
     PrepareSpellScript(spell_lcf2_hun_kill_command_hati);
@@ -517,7 +518,7 @@ class spell_lcf2_hun_kill_command_hati : public SpellScript
     }
 };
 
-// 19574 - Bestial Wrath: Master of Beasts -> 207033 on Hati (the reference core spell_hun_bestial_wrath / SpellAuras.cpp).
+// 19574 - Bestial Wrath: Master of Beasts -> 207033 on Hati (LegionCore spell_hun_bestial_wrath / SpellAuras.cpp).
 class spell_lcf2_hun_bestial_wrath_hati : public SpellScript
 {
     PrepareSpellScript(spell_lcf2_hun_bestial_wrath_hati);
@@ -539,7 +540,7 @@ class spell_lcf2_hun_bestial_wrath_hati : public SpellScript
 
 // ============================================================================================================
 // Hunter: Hati's Bond (197344) "Hati will now fight for you as a companion."
-// the reference core spell_hun_hatis_bond / spell_hun_broken_bond / Unit.cpp:
+// LegionCore spell_hun_hatis_bond / spell_hun_broken_bond / Unit.cpp:
 //  - summon spell by Titanstrike appearance set: 117 -> 211145, 118 -> 211146, 119 -> 211147, 120/221 -> 211148,
 //    otherwise 197388 (client: all six sets 116-120/221 are Titanstrike, all five spells summon a "Hati" entry)
 //  - every 2 s: summon Hati if the hunter has a pet and no Hati, despawn Hati when the pet is gone or Hati is more
@@ -644,7 +645,7 @@ class spell_lcf2_hun_hatis_bond : public AuraScript
     }
 };
 
-// Hati (100324, 106548-106551): normal pet AI; on death the owner gets Broken Bond (the reference core Unit.cpp setDeathState:
+// Hati (100324, 106548-106551): normal pet AI; on death the owner gets Broken Bond (LegionCore Unit.cpp setDeathState:
 // m_isHati -> owner->CastSpell(owner, 211117)).
 struct npc_lcf2_hati : public PetAI
 {
@@ -660,7 +661,7 @@ struct npc_lcf2_hati : public PetAI
 
 // ============================================================================================================
 // Hunter: Talon Bond (238089) "When Talon Strike triggers, your pet immediately attacks $s1 times."
-// the reference core spell_linked_spell 203560 -> 242735, caster = pet, actiontype 17 CAST_COUNT param 2; SimC sc_hunter.cpp
+// LegionCore spell_linked_spell 203560 -> 242735, caster = pet, actiontype 17 CAST_COUNT param 2; SimC sc_hunter.cpp
 // executes the pet's talon_slash effectN(1).base_value() times at the Talon Strike target.
 // 242735 damage from the client (SpellDescriptionVariables 274):
 //   $damage = $<ce> * $<spiked> * $<blink> * ($RAP * 0.333) * (1 + $@versadmg)
@@ -723,7 +724,7 @@ class spell_lcf2_hun_talon_slash : public SpellScript
 // ============================================================================================================
 // Hunter: Thunderslash (238087) "While Aspect of the Wild is active, Hati and your primary pet also trigger a
 // Thunderslash with each auto attack, dealing ${$243234s1*$<mult>} Nature damage."
-// the reference core Unit.cpp (dummy proc 238087): if the attacker's owner has Aspect of the Wild 193530 -> attacker casts
+// LegionCore Unit.cpp (dummy proc 238087): if the attacker's owner has Aspect of the Wild 193530 -> attacker casts
 // 243234 at the victim. The client puts the trait aura on the hunter (effect 202 on the caster, proc = melee auto
 // attack), so the pet's auto attack is caught with the melee damage script hook instead. $<mult> is not resolvable
 // from our client data - the spell's own coefficient (AP 0.5 of the pet) is used unchanged.
@@ -807,12 +808,12 @@ class spell_lcf2_way_of_the_flounder : public AuraScript
 // ============================================================================================================
 // Monk (Mistweaver): Sheilun, Staff of the Mists - the mist clouds were never generated nor consumed.
 //  - 214483 (equip effect of item 128937, aura 226 every 10 s): in combat cast 214501 (cloud AreaTrigger 7267, our
-//    spell_areatrigger already maps it). the reference core spell_aura_trigger 214483 -> 214501, hastype 17 LINK_IN_COMBAT.
-//  - Effusive Mists (238094) "Effuse causes Sheilun to generate a cloud of mist": the reference core Unit.cpp - on the Effuse
+//    spell_areatrigger already maps it). LegionCore spell_aura_trigger 214483 -> 214501, hastype 17 LINK_IN_COMBAT.
+//  - Effusive Mists (238094) "Effuse causes Sheilun to generate a cloud of mist": LegionCore Unit.cpp - on the Effuse
 //    heal proc (spell_proc_event family 53 mask0 0x2000000 = Effuse 116694), only in combat, cast 214501.
-//  - Sheilun's Gift (205406) "healing the target for $s1 per cloud absorbed": the reference core spell_monk_sheiluns_gift -
+//  - Sheilun's Gift (205406) "healing the target for $s1 per cloud absorbed": LegionCore spell_monk_sheiluns_gift -
 //    heal * number of the monk's 214501 clouds, all clouds removed.
-//  - Whispers of Shaohao (238130) "each active mist additionally heals a nearby target for $242400s1": the reference core
+//  - Whispers of Shaohao (238130) "each active mist additionally heals a nearby target for $242400s1": LegionCore
 //    areatrigger_actions 7267 (on despawn, hasspell 238130) -> 242400 from the cloud; spell_target_filter 242400 =
 //    nearest 1 ally.
 // ============================================================================================================
@@ -881,7 +882,7 @@ class spell_lcf2_monk_sheiluns_gift : public SpellScript
     }
 };
 
-// 242400 - Whispers of Shaohao: nearest single ally around the cloud (the reference core spell_target_filter option 4
+// 242400 - Whispers of Shaohao: nearest single ally around the cloud (LegionCore spell_target_filter option 4
 // SORT_BY_DISTANCE, resizeType 1, count 1).
 class spell_lcf2_monk_whispers_of_shaohao_heal : public SpellScript
 {
@@ -904,7 +905,7 @@ class spell_lcf2_monk_whispers_of_shaohao_heal : public SpellScript
 // ============================================================================================================
 // Monk (Mistweaver): Blessings of Yu'lon (199665) "Activating Revival summons the spirit of Yu'lon, healing all
 // Revival targets for an additional $s1% of Revival's heal over $199671d."
-// the reference core spell_trigger 199665 -> 199668 option 3 (DAM_HEALTH: bp = (heal + absorb) * trait% / bp1, bp1 = 6) =
+// LegionCore spell_trigger 199665 -> 199668 option 3 (DAM_HEALTH: bp = (heal + absorb) * trait% / bp1, bp1 = 6) =
 // per-tick amount of the 6 s / 1 s HoT (client 199668); spell_linked_spell 115310 -> 199671 (Yu'lon, visual only,
 // its pet aura 210110 is a plain dummy). The divisor 6 equals 199668 duration / period, so it is taken from there.
 // ============================================================================================================
@@ -963,7 +964,7 @@ class spell_lcf2_monk_revival_yulon : public SpellScript
 // ============================================================================================================
 // Monk (Windwalker): Crosswinds (195650) "During Fists of Fury, Wind Spirit images of you attack your Fists of Fury
 // targets for a total of ${8*$196061s1} additional Physical damage."  (Round LCF2 R23: target choice settled, see tick):
-// the reference core spell_trigger 195650 -> 195651 on Fists of Fury (spell_proc_event mask1 0x800000 = 113656).
+// LegionCore spell_trigger 195650 -> 195651 on Fists of Fury (spell_proc_event mask1 0x800000 = 113656).
 // 195651 (client) is a 4 s PERIODIC_TRIGGER_SPELL every 0.5 s -> 195653 (Wind Spirit image, visual) = 8 ticks, which
 // is exactly the "8 *" of the tooltip -> one 196061 hit per tick. SimC sc_monk.cpp: each image hits a random Fists of
 // Fury target. We have no list of Fists of Fury targets here, so the image hits the monk's current victim.
@@ -989,8 +990,8 @@ class spell_lcf2_monk_crosswinds_driver : public AuraScript
 {
     PrepareAuraScript(spell_lcf2_monk_crosswinds_driver);
 
-    // Round LCF2 R23: target choice now as the reference core (npcs_special.cpp npc_monk_wind_spirit + spell_generic.cpp
-    // spell_gen_monk_crosswinds): each Wind Spirit image picks the NEAREST unit (<= 40 yd, the reference core value) that carries
+    // Round LCF2 R23: target choice now as LegionCore-7.3.5 (npcs_special.cpp npc_monk_wind_spirit + spell_generic.cpp
+    // spell_gen_monk_crosswinds): each Wind Spirit image picks the NEAREST unit (<= 40 yd, LegionCore value) that carries
     // this monk's "Fists of Fury Visual Target" 123154 - i.e. a Fists of Fury target - and the monk casts 196061 on it.
     // 123154 is refreshed on every Fists of Fury hit and lasts 1 s (spell_monk_fists_of_fury_visual), so it marks the
     // current Fists of Fury targets. Fallback (no marked target): the monk's victim / selection as before.
@@ -1031,14 +1032,14 @@ class spell_lcf2_monk_crosswinds_driver : public AuraScript
 
 // ============================================================================================================
 // Fishing artifact (Underlight Angler): Undercurrent (201891) "Teleport to the nearest fishing node."
-// the reference core spell_undercurrent_fishing / _tele: not in combat, nearest GAMEOBJECT_TYPE_FISHINGHOLE within 100 yd
-// (the reference core value), then 216426 (client: SPELL_EFFECT_TELEPORT_UNITS to the destination) to the node.
+// LegionCore spell_undercurrent_fishing / _tele: not in combat, nearest GAMEOBJECT_TYPE_FISHINGHOLE within 100 yd
+// (LegionCore value), then 216426 (client: SPELL_EFFECT_TELEPORT_UNITS to the destination) to the node.
 // ============================================================================================================
 class spell_lcf2_undercurrent : public SpellScript
 {
     PrepareSpellScript(spell_lcf2_undercurrent);
 
-    static constexpr float SEARCH_RANGE = 100.0f; // the reference core spell_generic.cpp
+    static constexpr float SEARCH_RANGE = 100.0f; // LegionCore spell_generic.cpp
 
     SpellCastResult CheckCast()
     {
@@ -1066,7 +1067,7 @@ class spell_lcf2_undercurrent : public SpellScript
 
 // ============================================================================================================
 // Priest: Lash of Insanity (238137) - Void Tendril (98167) Mind Flay 193473 ticks give the priest 240843
-// (ENERGIZE 300 = 3 Insanity). the reference core spell_aura_trigger 193473 -> 240843, caster 2 (owner), hastype 3 (aura on
+// (ENERGIZE 300 = 3 Insanity). LegionCore spell_aura_trigger 193473 -> 240843, caster 2 (owner), hastype 3 (aura on
 // owner) 238137, slot 98167 (caster entry).
 // ============================================================================================================
 class spell_lcf2_pri_lash_of_insanity : public AuraScript
@@ -1092,7 +1093,7 @@ class spell_lcf2_pri_lash_of_insanity : public AuraScript
 // ============================================================================================================
 // Warlock: Stolen Power (211530) "When your Wild Imps cast Firebolt, you gain an application of Stolen Power. After
 // you reach $211529u applications, your next Shadowbolt/Demonbolt deals ... increased damage."
-// the reference core: spell_pet_auras 55659 -> 211592 (only with 211530 on the owner), spell_proc_check 211592 = Firebolt
+// LegionCore: spell_pet_auras 55659 -> 211592 (only with 211530 on the owner), spell_proc_check 211592 = Firebolt
 // 104318/3110 -> stack 211529 on the warlock; spell_warl_stolen_power: on a 211529 tick with >= 100 stacks cast 211583
 // and drop the stacks. Our Wild Imps (99739, npc_pet_warlock_wild_imp) cast 104318 directly, so the stack is added
 // from the Firebolt itself (same trigger) with the warlock as caster so all imps feed one stack.
@@ -1136,7 +1137,7 @@ class spell_lcf2_warl_stolen_power_stack : public AuraScript
 
 // ============================================================================================================
 // Warlock: Doom, Doubled (218572) "Doom has a chance to deal double damage."
-// the reference core: spell_proc_event 218572 (DONE_PERIODIC, chance 35 = client E0 BP), spell_proc_check = Doom 603 ->
+// LegionCore: spell_proc_event 218572 (DONE_PERIODIC, chance 35 = client E0 BP), spell_proc_check = Doom 603 ->
 // 218572 E0 trigger 218571 (client, charges 1); spell_aura_dummy 603/218571 option 9 DAMAGE_ADD_PERC on Doom E0 while
 // the warlock has 218571 (+218571 E0 = 100 %). 218571's own proc is suppressed; it is consumed by the doubled tick.
 // ============================================================================================================
@@ -1219,10 +1220,10 @@ class spell_lcf2_warl_doom_tick : public AuraScript
 
 // ============================================================================================================
 // Shaman: Alpha Wolf (198434) "While Feral Spirits are active, Crash Lightning causes your wolves to attack all nearby
-// enemies for the next $198486d." the reference core spell_linked_spell 187874 -> 198486 actiontype 22 CAST_ON_SUMMON on
+// enemies for the next $198486d." LegionCore spell_linked_spell 187874 -> 198486 actiontype 22 CAST_ON_SUMMON on
 // 29264 and 100820 (with 198434); spell_sha_alpha_wolf: every 198486 tick (2 s, client) the wolf casts by model
 // Spirit Bomb / Fire Nova / Snowstorm / Thunder Bite (victim). Our plain Spirit Wolf 29264 uses model 21114 instead of
-// the reference core's 55290, so it is matched by entry (SimC: spirit wolf -> spirit_bomb).
+// LegionCore's 55290, so it is matched by entry (SimC: spirit wolf -> spirit_bomb).
 // ============================================================================================================
 class spell_lcf2_sha_crash_lightning_alpha_wolf : public SpellScript
 {
@@ -1296,7 +1297,7 @@ class spell_lcf2_sha_alpha_wolf_aura : public AuraScript
 //   flag 5 s as an unverified placeholder, not a datamined or tested value. This is new, harder evidence than before:
 //   it proves the uncertainty is structural (nobody, including the reference theorycrafting tool, ever confirmed a
 //   real cadence), not just "no source found yet" - see report lcf2r38_2026-09-26_traits_final.md, section "Doom Wolves".
-// - No further source exists (the reference core has no Doom Wolf AI at all; TDB837/1210/SkyFire/Draenor-Core precede or
+// - No further source exists (LegionCore has no Doom Wolf AI at all; TDB837/1210/SkyFire/Draenor-Core precede or
 //   postdate Legion; no relevant Wowhead/MMO-Champion/Reddit/Icy-Veins Legion-era comment found for the wolves'
 //   attack cadence specifically, only for the trait's existence).
 // Kept at 5 s (matches the widely-used SimC default so damage output stays roughly comparable), explicitly marked
@@ -1339,7 +1340,7 @@ class spell_lcf2_sha_doom_wolves_summon : public SpellScript
 // ============================================================================================================
 // Shaman (Restoration): Tidal Pools (207358) "Riptide has a chance to summon a Tidal Totem at the target's location,
 // which heals nearby allies for ${7*$209069s1} over $208932d." (client proc chance 20 %)
-// the reference core: spell_proc_event 207358 = Riptide, spell_trigger -> 208932 (Tidal Totem 105422), pet aura 233487
+// LegionCore: spell_proc_event 207358 = Riptide, spell_trigger -> 208932 (Tidal Totem 105422), pet aura 233487
 // (AreaTrigger 9449: radius 8, updateDelay 850 ms, each update casts 209069; spell_target_filter 209069 = nearest 6).
 // 6000 ms / 850 ms = 7 pulses = the "7 *" of the tooltip. The totem creature itself is not summoned here: its
 // SummonProperties 3803 (Control 1) would make it a following PetAI guardian in our core. Instead the AreaTrigger
@@ -1349,7 +1350,7 @@ class spell_lcf2_sha_tidal_pools : public AuraScript
 {
     PrepareAuraScript(spell_lcf2_sha_tidal_pools);
 
-    static constexpr uint32 PULSE_MS = 850; // the reference core areatrigger_data 9449 updateDelay
+    static constexpr uint32 PULSE_MS = 850; // LegionCore areatrigger_data 9449 updateDelay
 
     bool CheckProc(ProcEventInfo& eventInfo)
     {
@@ -1397,7 +1398,7 @@ class spell_lcf2_sha_tidal_totem_heal : public SpellScript
         WorldLocation const* dest = GetExplTargetDest();
         if (!dest || targets.size() <= 6)
             return;
-        KeepNearest(targets, *dest, 6); // the reference core spell_target_filter 209069: count 6
+        KeepNearest(targets, *dest, 6); // LegionCore spell_target_filter 209069: count 6
     }
 
     void Register() override
@@ -1409,7 +1410,7 @@ class spell_lcf2_sha_tidal_totem_heal : public SpellScript
 // ============================================================================================================
 // Death Knight: The Shambler (191760, client RPPM 1.5 on melee) "Your attacks have a chance to summon a Super Zombie
 // that shambles forward and explodes, dealing $191758s1 Shadow damage to nearby enemies."
-// the reference core spell_trigger 191760 -> 191759 (summon 97055, 3 s); spell_pet_auras 97055: 191759 option 7 (move to its
+// LegionCore spell_trigger 191760 -> 191759 (summon 97055, 3 s); spell_pet_auras 97055: 191759 option 7 (move to its
 // target), -191758 option 8 (on unsummon cast Necrobomb, owner as original caster). The Shambling Horror is a PetAI
 // guardian here (SummonProperties 3871 Control 1) and runs to the target by itself; it explodes just before expiry.
 // ============================================================================================================
@@ -1462,12 +1463,12 @@ class spell_lcf2_dk_summon_shambling_horror : public SpellScript
 // ============================================================================================================
 // Death Knight: Armies of the Damned (191731) "Ghouls summoned by Army of the Dead apply additional effects with their
 // Claw attack" - Death / War / Famine / Pestilence = 191730 / 191729 / 191727 / 191728 (client).
-// the reference core spell_dk_claw_owner (on 199373): on every Claw hit one of the four at random, DK as original caster.
-// R37 (26.09.2026): RESOLVED in favor of the reference core's "every hit" model. Client DB2 spellauraoptions.csv
+// LegionCore spell_dk_claw_owner (on 199373): on every Claw hit one of the four at random, DK as original caster.
+// R37 (26.09.2026): RESOLVED in favor of LegionCore's "every hit" model. Client DB2 spellauraoptions.csv
 // (build 26972) gives all four buffs (191727-191730) ProcChance = 101, the same non-percentage sentinel value
 // already confirmed on a known script-applied buff (Precise Strikes 248195, Round LCF2 R23) - i.e. the client
 // itself marks these as script-driven, not RNG-gated. SimulationCraft's 20 % was a configurable default/estimate
-// (sc_death_knight.cpp comment, 2016-08-23), not a sourced value. the reference core's deterministic "every Claw hit" is
+// (sc_death_knight.cpp comment, 2016-08-23), not a sourced value. LegionCore's deterministic "every Claw hit" is
 // the correct model and is what this script already implements; no code change needed, this is a documentation
 // upgrade only. The ghoul's Claw usage itself is in pet_dk.cpp (npc_pet_dk_army_of_the_dead_ghoul).
 // ============================================================================================================
@@ -1496,7 +1497,7 @@ class spell_lcf2_dk_army_claw : public SpellScript
 // 218321 - Dragged to Helheim (Portal to the Underworld, cast by the Army ghoul in pet_dk.cpp): the client puts the
 // damage ("$s1", E0: BP 0, AP coefficient 1.62) on an effect without targets and the area hit on E1 (BP 0, no
 // coefficient). E1 gets E0's value: 1.62 * attack power of the original caster (the death knight, whose tooltip shows
-// "$218321s1"). the reference core instead overrides the AP bonus in spell_bonus_data (3.24) - not used.
+// "$218321s1"). LegionCore instead overrides the AP bonus in spell_bonus_data (3.24) - not used.
 class spell_lcf2_dk_dragged_to_helheim : public SpellScript
 {
     PrepareSpellScript(spell_lcf2_dk_dragged_to_helheim);
@@ -1518,7 +1519,7 @@ class spell_lcf2_dk_dragged_to_helheim : public SpellScript
 
 // ============================================================================================================
 // Rogue: Akaari's Soul (209835) "After using Shadowstrike or Cheap Shot, Akaari's Soul appears $m1 sec later and Soul
-// Rips your target, dealing $220893s1 Shadow damage." the reference core spell_trigger 209835 -> 209837 option 45 CAST_DELAY
+// Rips your target, dealing $220893s1 Shadow damage." LegionCore spell_trigger 209835 -> 209837 option 45 CAST_DELAY
 // bp0 2000 (= client $m1 2 s), spell_proc_event masks = Cheap Shot / Shadowstrike; spell_pet_auras 105850 -> 220893
 // at the owner's selected target on summon. The rogue is original caster of Soul Rip (tooltip value is the rogue's).
 // ============================================================================================================

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -111,7 +111,7 @@ void Scenario::SetStep(ScenarioStepEntry const* step)
     BuildScenarioState(&scenarioState);
     SendPacket(scenarioState.Write());
 
-    // Legion-Server round 44: additive callback for OutdoorPvP-owned zone scenarios (ported from the reference core's
+    // Legion-Server round 44: additive callback for OutdoorPvP-owned zone scenarios (ported from LegionCore's
     // Scenario::SetStep(), which calls outDoorPvP->SetData(zone, currentStep) the same way). Guarded by
     // _ownerOutdoorPvP being non-null, which is only ever set via SetOutdoorPvP() (R43) - a no-op, zero behavior
     // change for every dungeon/InstanceScenario Scenario (_ownerOutdoorPvP stays nullptr for those).

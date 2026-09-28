@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -271,7 +271,7 @@ void WorldSession::HandleConfirmArtifactRespec(WorldPackets::Artifact::ConfirmAr
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Round 19 (25.09.2026): Relic Forge / Netherlight Crucible client window - CODE CANDIDATE, inactive unless
-// worldserver.conf NetherlightCrucible.ClientUI = 1. Wire format and slot numbering from the reference core (see
+// worldserver.conf NetherlightCrucible.ClientUI = 1. Wire format and slot numbering from LegionCore-7.3.5 (see
 // NetherlightCrucible.h); all game rules stay in NetherlightCrucible (the same code the gossip menu uses), so a wrong
 // packet can at worst be ignored, never grant anything the gossip path would not grant.
 // ---------------------------------------------------------------------------------------------------------------------
@@ -280,7 +280,7 @@ namespace
     enum : uint32
     {
         ARTIFACT_FORGE_TYPE_RELIC_FORGE = 1,    // GameObjectData.h artifactForge.ForgeType: enum { Artifact Forge, Relic Forge }
-        RELIC_SOCKET_INDEX_OFFSET       = 2     // the reference core: socket index in packets and in the update field = gem slot + 2
+        RELIC_SOCKET_INDEX_OFFSET       = 2     // LegionCore: socket index in packets and in the update field = gem slot + 2
     };
 
     Item* GetRelicForgeArtifact(Player* player, ObjectGuid const& forgeGuid, ObjectGuid const& artifactGuid)
@@ -307,7 +307,7 @@ namespace
     {
         if (socketIndex < RELIC_SOCKET_INDEX_OFFSET || socketIndex - RELIC_SOCKET_INDEX_OFFSET >= MAX_ITEM_PROTO_SOCKETS)
         {
-            // logged on purpose: the +2 numbering is the one part of the format that only the reference core documents
+            // logged on purpose: the +2 numbering is the one part of the format that only LegionCore documents
             TC_LOG_INFO("network", "%s: %s sent socket index %u, expected %u..%u - packet ignored", opcode,
                 player->GetGUID().ToString().c_str(), socketIndex, uint32(RELIC_SOCKET_INDEX_OFFSET),
                 uint32(RELIC_SOCKET_INDEX_OFFSET + MAX_ITEM_PROTO_SOCKETS - 1));
@@ -355,7 +355,7 @@ void WorldSession::HandleArtifactAddRelicTalent(WorldPackets::Artifact::Artifact
 
 void WorldSession::HandleArtifactAttunePreviewRelic(WorldPackets::Artifact::ArtifactAttunePreviewRelic& packet)
 {
-    // Not implemented: attuning a relic in the bags before socketing needs talent storage per relic item (the reference core writes
+    // Not implemented: attuning a relic in the bags before socketing needs talent storage per relic item (LegionCore writes
     // the field on the relic item itself and copies it on socketing). Relics are attuned after socketing instead, which the
     // window supports (AttuneSocketedRelic). The packet is only logged.
     TC_LOG_DEBUG("network", "CMSG_ARTIFACT_ATTUNE_PREVIEW_RELIC: %s relic %s forge %s - preview attunement not supported, ignored",

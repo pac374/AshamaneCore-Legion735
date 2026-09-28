@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  * Copyright (C) 2005-2009 MaNGOS <http://getmangos.com/>
  *
@@ -1692,7 +1692,7 @@ void Pet::CastPetAuras(bool current)
     }
 
     // Artifact traits that give the permanent pet an aura with the trait value (Round LCF 25.09.2026, mechanic as in
-    // the reference core Pet.cpp; numbers from the 7.3.5 client):
+    // LegionCore-7.3.5 Pet.cpp; numbers from the 7.3.5 client):
     //   Left Hand of Darkness 238073 -> 238998 (MOD_DAMAGE_PERCENT_DONE), halved with Grimoire of Supremacy 152107
     //                                   (tooltip "$?s152107[${$s1/2}.1][$s1]%")
     //   Fluffy, Go 203669            -> 218955 (MOD_MELEE_HASTE)

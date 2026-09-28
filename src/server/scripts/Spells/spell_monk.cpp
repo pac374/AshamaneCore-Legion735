@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2017-2018 AshamaneProject <https://github.com/AshamaneProject>
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
@@ -2829,7 +2829,7 @@ public:
                     // trigger points - "a $s1% chance to immediately spread to an additional target when
                     // INITIALLY CAST or when TRAVELING to a new target." Only the "traveling" half was
                     // implemented (gen_arti_monk_dancing_mists on 119611, spell_artifact_traits_gen.cpp);
-                    // this is the missing "initially cast" half. Source: the reference core
+                    // this is the missing "initially cast" half. Source: LegionCore-7.3.5
                     // spell_monk_renewing_mist_main::HandleBeforeCast (downloads\lc_src\repo\src\server\
                     // scripts\Spells\spell_monk.cpp) - the ONLY place in either codebase that keys off
                     // caster->GetAuraEffect(199573) directly, so this is the real mechanic, not a guess.

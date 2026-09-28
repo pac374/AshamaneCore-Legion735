@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -1284,7 +1284,7 @@ struct SmartAction
             uint32 triggered;
         } castOffSet;
 
-        // Legion-Server round 50: bridge to Scenario::SendScenarioEvent, mirrors the reference core SmartAI action
+        // Legion-Server round 50: bridge to Scenario::SendScenarioEvent, mirrors LegionCore SmartAI action
         // type 205 (params 92/eventId) - only the event id is kept, the redundant "92" type marker is dropped
         // on import. Fires the scenario event for every player among the action's targets.
         struct

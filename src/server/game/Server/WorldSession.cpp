@@ -183,7 +183,7 @@ WorldSession::~WorldSession()
             // den Fall, dass eine Bot-Session auf einem anderen Weg als OnShutdown() zerstoert
             // wird (z.B. kuenftiges RemoveBot()): Player-Zeiger freigeben, aber KEIN
             // LogoutPlayer()/SaveToDB()-Aufruf (also kein DB-Zugriff) mehr riskieren.
-            TC_LOG_ERROR("scripts.bots", "[BotDiag] WorldSession-Destruktor fuer Bot-Account {} "
+            TC_LOG_ERROR("scripts.bots", "[BotDiag] WorldSession-Destruktor fuer Bot-Account %u "
                 "erreicht mit noch gesetztem _player - LogoutAllBots() hat diese Session offenbar "
                 "nicht erreicht. Player-Zeiger wird ohne SaveToDB()/DB-Zugriff freigegeben.",
                 GetAccountId());

@@ -1,4 +1,4 @@
-﻿################################################
+################################################
 # Trinity Core World Server configuration file #
 ################################################
 [worldserver]
@@ -4175,7 +4175,7 @@ BattlePay.Currency = 1
 #        Description: Use the client's relic forge window at the Netherlight Crucible (GameObject 273272)
 #                     instead of the gossip menu. Handles CMSG_ARTIFACT_ADD_RELIC_TALENT and
 #                     CMSG_ARTIFACT_ATTUNE_SOCKETED_RELIC and fills ITEM_DYNAMIC_FIELD_RELIC_TALENT_DATA.
-#                     The packet/field format comes from the reference core only (not confirmed by a sniff),
+#                     The packet/field format comes from LegionCore-7.3.5 only (not confirmed by a sniff),
 #                     see C:\LegionServer\reports\trait_candidates_report.md, round 19. Test before enabling.
 #        Default:     0 - (gossip menu, field never written)
 #                     1 - (client relic forge window)

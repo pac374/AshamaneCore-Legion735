@@ -1,4 +1,4 @@
-﻿/*
+/*
 * Copyright (C) 2017-2018 AshamaneProject <https://github.com/AshamaneProject>
 *
 * This program is free software; you can redistribute it and/or modify it
@@ -343,7 +343,7 @@ class spell_arti_warl_dimensional_rift : public SpellScript
         // Durations must be longer, because if the npc gets destroyed before the last projectile hits
         // it won't deal any damage.
         std::vector<uint32> durations = { 7000, 4500, 16000 };
-        // Round LCF2 R23 - Flame Rift (238146): the reference core spell_linked_spell 196586 randList = 187370/196639/215276
+        // Round LCF2 R23 - Flame Rift (238146): LegionCore-7.3.5 spell_linked_spell 196586 randList = 187370/196639/215276
         // without the trait, + 242983 "Flame Rift" (summons 121643, 40 s) with it - an even 4th choice.
         bool flameRift = caster->HasAura(238146);
         uint32 id = std::rand() % (flameRift ? 4 : 3);

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -33,6 +33,8 @@ EndScriptData */
 #include "SharedDefines.h"
 #include "Player.h"
 #include "RBAC.h"
+#include "ObjectAccessor.h"
+#include "WorldSession.h"
 #include <sstream>
 
 class bot_commandscript : public CommandScript
@@ -51,6 +53,21 @@ public:
             { "move",          rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestMove,          "" },
             { "movepath",      rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestMovePath,      "" },
             { "patrol",        rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestPatrol,        "" },
+            { "teleport",      rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestTeleport,      "" },
+            { "attack",        rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestAttack,        "" },
+            { "attackstop",    rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestAttackStop,    "" },
+            { "invuln",        rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestInvuln,        "" },
+            { "loot",          rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestLoot,          "" },
+            { "release",       rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestRelease,       "" },
+            { "revive",        rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestRevive,        "" },
+            { "equip",         rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestEquip,         "" },
+            { "equipfrompool", rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestEquipFromPool, "" },
+            { "groupinvite",   rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestGroupInvite,   "" },
+            { "groupleave",    rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestGroupLeave,    "" },
+            { "follow",        rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestFollow,        "" },
+            { "followstop",    rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestFollowStop,    "" },
+            { "equipartifact", rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestEquipArtifact, "" },
+            { "skillartifact", rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestSkillArtifact, "" },
             { "status",        rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestStatus,        "" },
         };
         static std::vector<ChatCommand> commandTable =
@@ -277,6 +294,544 @@ public:
         return true;
     }
 
+    // .bottest teleport <accountId> <mapId> <x> <y> <z> [orientation]
+    // Runde 93 (28.09.2026): EIN einziger Kartenwechsel-Live-Test. Siehe
+    // BotMgr::TeleportBot() fuer den vollen Code-Review (lcf2r89/lcf2r90) - ruft
+    // player->TeleportTo() auf, danach manuell botSession->HandleMoveWorldportAck()
+    // (ersetzt den nie eintreffenden Client-Ack). Synchron - Ergebnis (inkl.
+    // Ziel-Abgleich) steht sofort fest, zusaetzlich mit '.bottest status' pruefbar.
+    static bool HandleBotTestTeleport(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest teleport <accountId> <mapId> <x> <y> <z> [orientation]");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        uint32 accountId = 0, mapId = 0;
+        float x = 0.0f, y = 0.0f, z = 0.0f, orientation = 0.0f;
+        iss >> accountId >> mapId >> x >> y >> z;
+        if (iss >> orientation) { }
+
+        if (accountId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest teleport <accountId> <mapId> <x> <y> <z> [orientation]");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->TeleportBot(accountId, mapId, x, y, z, orientation);
+        handler->PSendSysMessage("[bottest] teleport(account %u -> map %u, %.2f/%.2f/%.2f): %s - "
+            "'.bottest status %u' pruefen, Server.log auf 'BotMgr::TeleportBot' Diagnose-Zeilen pruefen.",
+            accountId, mapId, x, y, z, ok ? "ZIEL ERREICHT" : "FEHLER/ABWEICHUNG (siehe Server.log)", accountId);
+        return true;
+    }
+
+    // .bottest attack <accountId> <targetGuid>
+    // Runde 122 (28.09.2026): EIN einziger Kampf-Live-Test - siehe BotMgr::StartBotAttack() fuer den
+    // vollen Code-Review (lcf2r121). targetGuid ist die DB-Spawn-Id aus der `creature`-Tabelle (Spalte
+    // "guid"), NICHT die laufzeit-volle ObjectGuid. Ruft player->Attack(target, true) auf - reiner
+    // Melee-Auto-Attack, KEIN Spell-Cast. Synchron ausgeloest, der eigentliche Schaden/die Pakete
+    // laufen danach tick-gesteuert - NACH GENAU EINEM Autoattack-Zyklus sofort
+    // '.bottest attackstop <accountId>' aufrufen (Auftragsvorgabe).
+    static bool HandleBotTestAttack(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest attack <accountId> <targetGuid> (targetGuid = DB-Spawn-Id aus creature.guid)");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        uint32 accountId = 0;
+        uint64 targetGuid = 0;
+        iss >> accountId >> targetGuid;
+
+        if (accountId == 0 || targetGuid == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest attack <accountId> <targetGuid> (targetGuid = DB-Spawn-Id aus creature.guid)");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->StartBotAttack(accountId, ObjectGuid::LowType(targetGuid));
+        handler->PSendSysMessage("[bottest] attack(account %u -> targetGuid %llu): %s - NACH GENAU EINEM "
+            "Autoattack-Zyklus (paar Sekunden warten, waffengeschwindigkeitsabhaengig) sofort "
+            "'.bottest attackstop %u' aufrufen, danach Server.log auf 'BotMgr::StartBotAttack' pruefen.",
+            accountId, (unsigned long long)targetGuid, ok ? "Attack() ausgeloest" : "FEHLER (siehe Server.log)", accountId);
+
+        // Runde 122 Zusatz-Diagnose: der "scripts.bots"-Logkanal hat einen seit Runde 106/108 bekannten
+        // Bug (literale "{}"-Platzhalter statt substituierter Werte, siehe playerbots-module-idea.md).
+        // Bei einem FEHLER hier deshalb bewusst per PSendSysMessage (printf-Style, nachweislich
+        // funktionierend) statt per TC_LOG diagnostizieren, damit ein Attack()-Fehlschlag trotzdem
+        // auswertbar bleibt.
+        if (!ok)
+        {
+            if (Player* player = sBotMgr->GetBotPlayer(accountId))
+            {
+                handler->PSendSysMessage("[bottest] attack-diag: player->IsAlive()=%u player->IsMounted()=%u "
+                    "player->HasFlag(PACIFIED)=%u player->GetTypeId()==PLAYER=%u",
+                    player->IsAlive(), player->IsMounted(),
+                    player->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PACIFIED), player->GetTypeId() == TYPEID_PLAYER);
+            }
+        }
+        return true;
+    }
+
+    // .bottest attackstop <accountId>
+    // Runde 122 (28.09.2026): Gegenstueck zu '.bottest attack' - ruft player->AttackStop() auf. Siehe
+    // BotMgr::StopBotAttack().
+    static bool HandleBotTestAttackStop(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest attackstop <accountId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        uint32 accountId = uint32(atoi(args));
+        if (accountId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest attackstop <accountId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        sBotMgr->StopBotAttack(accountId);
+        handler->PSendSysMessage("[bottest] attackstop(account %u): AttackStop() ausgeloest - "
+            "'.bottest status %u' pruefen.", accountId, accountId);
+        return true;
+    }
+
+    // .bottest invuln <accountId> <on|off>
+    // Runde 129 (28.09.2026): schaltet die Testbot-Damage-Immunitaet aus BotMgr::SetBotTestInvulnerable()
+    // um (siehe dortigen vollen Code-Review) - NUR fuer den angegebenen Bot-Account, NIE global/
+    // automatisch. Gedacht fuer Kampf-Livetests: vor dem Angriff 'on', direkt danach wieder 'off'.
+    static bool HandleBotTestInvuln(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest invuln <accountId> <on|off>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        uint32 accountId = 0;
+        std::string onOff;
+        iss >> accountId >> onOff;
+
+        if (accountId == 0 || (onOff != "on" && onOff != "off"))
+        {
+            handler->SendSysMessage("Syntax: .bottest invuln <accountId> <on|off>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool enable = (onOff == "on");
+        bool ok = sBotMgr->SetBotTestInvulnerable(accountId, enable);
+        handler->PSendSysMessage("[bottest] invuln(account %u, %s): %s - NUR fuer Test-Zwecke, nach dem Test "
+            "'.bottest invuln %u off' nicht vergessen.",
+            accountId, onOff.c_str(), ok ? "OK" : "FEHLER (siehe Server.log)", accountId);
+        return true;
+    }
+
+    // .bottest loot <accountId> <targetGuid>
+    // Runde 129 (28.09.2026): EIN einziger Loot-Live-Test - siehe BotMgr::BotLootTarget() fuer den
+    // vollen Code-Review (Plan aus lcf2r128 Abschnitt 7). targetGuid ist die DB-Spawn-Id aus der
+    // `creature`-Tabelle (Spalte "guid"), NICHT die laufzeit-volle ObjectGuid - dieselbe Konvention
+    // wie '.bottest attack'. Das Ziel MUSS bereits tot sein (erst per '.bottest attack' toeten).
+    // Synchron - Ergebnis (inkl. Item-Anzahl) steht sofort fest, zusaetzlich per Server.log pruefbar.
+    static bool HandleBotTestLoot(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest loot <accountId> <targetGuid> (targetGuid = DB-Spawn-Id aus creature.guid, Ziel muss bereits tot sein)");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        uint32 accountId = 0;
+        uint64 targetGuid = 0;
+        iss >> accountId >> targetGuid;
+
+        if (accountId == 0 || targetGuid == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest loot <accountId> <targetGuid> (targetGuid = DB-Spawn-Id aus creature.guid, Ziel muss bereits tot sein)");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->BotLootTarget(accountId, ObjectGuid::LowType(targetGuid));
+        handler->PSendSysMessage("[bottest] loot(account %u -> targetGuid %llu): %s - Server.log auf "
+            "'BotMgr::BotLootTarget' Diagnose-Zeilen pruefen (Item-Anzahl, target->loot.isLooted()).",
+            accountId, (unsigned long long)targetGuid, ok ? "Loot-Zyklus durchlaufen" : "FEHLER (siehe Server.log)");
+        return true;
+    }
+
+    // .bottest release <accountId>
+    // Runde 132 (28.09.2026): EIN einziger Tod-Handling-Livetest - Gegenstueck zum Client-seitigen
+    // "Geist werden"-Bestaetigungsdialog (CMSG_REPOP_REQUEST). Siehe BotMgr::HandleBotDeath() fuer
+    // den vollen Code-Review. Der Bot muss vorher bereits tot sein (echter Kampf-Kill OHNE
+    // '.bottest invuln on', z.B. per '.bottest attack'/'.bottest attackstop' gegen ein
+    // ausreichend gefaehrliches, isoliertes Ziel). Synchron - Ergebnis (Geist-Flag, Position, Map)
+    // steht sofort fest, zusaetzlich per Server.log/'bottest status' pruefbar.
+    static bool HandleBotTestRelease(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest release <accountId> (Bot muss bereits tot sein, z.B. per echtem Kampf-Kill ohne 'invuln')");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        uint32 accountId = uint32(atoi(args));
+        if (accountId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest release <accountId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->HandleBotDeath(accountId);
+        handler->PSendSysMessage("[bottest] release(account %u): %s - '.bottest status %u' pruefen (sollte als "
+            "Geist am naechsten Friedhof stehen), danach ggf. '.bottest revive %u'.",
+            accountId, ok ? "OK (Release/Graveyard-Ablauf durchlaufen)" : "FEHLER (siehe Server.log)",
+            accountId, accountId);
+        return true;
+    }
+
+    // .bottest revive <accountId>
+    // Runde 132 (28.09.2026): Gegenstueck zu '.bottest release' - volle Wiederbelebung MIT
+    // Resurrection Sickness, entspricht dem Spirit-Healer-Rechtsklick (SendSpiritResurrect()).
+    // Siehe BotMgr::ReviveBotAtGraveyard() fuer den vollen Code-Review. Bot muss vorher per
+    // '.bottest release' als Geist markiert worden sein.
+    static bool HandleBotTestRevive(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest revive <accountId> (Bot muss vorher per '.bottest release' Geist sein)");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        uint32 accountId = uint32(atoi(args));
+        if (accountId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest revive <accountId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->ReviveBotAtGraveyard(accountId);
+        handler->PSendSysMessage("[bottest] revive(account %u): %s - '.bottest status %u' pruefen (sollte wieder "
+            "leben, Resurrection-Sickness-Aura 15007 falls Level ausreichend).",
+            accountId, ok ? "OK (SendSpiritResurrect() durchlaufen)" : "FEHLER (siehe Server.log)", accountId);
+        return true;
+    }
+
+    // .bottest equip <accountId> <itemEntry>
+    // Runde 133 (28.09.2026): EIN einziger Ausruesten-Livetest - siehe BotMgr::EquipBotItem() fuer den
+    // vollen Code-Review. Legt ein Test-Item (itemEntry aus item_template) ueber denselben Pfad wie
+    // ".additem" ins Bot-Inventar und ruestet es danach direkt in den passenden Ausruestungsslot aus.
+    // AUSDRUECKLICH NICHT ueber Loot (Runde 131 gestrichen). Synchron - Ergebnis steht sofort fest,
+    // zusaetzlich per '.bottest status' und characters.item_instance/characters.inventory pruefbar.
+    static bool HandleBotTestEquip(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest equip <accountId> <itemEntry> (itemEntry aus item_template, Slot muss noch leer sein)");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        uint32 accountId = 0, itemEntry = 0;
+        iss >> accountId >> itemEntry;
+
+        if (accountId == 0 || itemEntry == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest equip <accountId> <itemEntry> (itemEntry aus item_template, Slot muss noch leer sein)");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->EquipBotItem(accountId, itemEntry);
+        handler->PSendSysMessage("[bottest] equip(account %u, itemEntry %u): %s - '.bottest status %u' und "
+            "characters.item_instance/characters.inventory (equip-Slot) pruefen.",
+            accountId, itemEntry, ok ? "OK (Item im Ausruestungsslot bestaetigt)" : "FEHLER (siehe Server.log)",
+            accountId);
+        return true;
+    }
+
+    // .bottest equipfrompool <accountId>
+    // Runde 135 (28.09.2026): rüstet einen Bot VOLLSTAENDIG aus dem neuen Equipment-Pool aus (Design
+    // lcf2r134, Implementierung siehe BotMgr::EquipBotFromPool()) - wuerfelt/liest die dauerhaft fixe
+    // Pool-Qualitaetsstufe des Bots und ruestet Slot fuer Slot ueber die bereits in Runde 133 live
+    // bestaetigte EquipBotItem()-Logik aus. Kein itemEntry-Parameter noetig (im Gegensatz zu
+    // '.bottest equip') - die Auswahl passiert automatisch nach Level/Klasse/Qualitaetsstufe.
+    static bool HandleBotTestEquipFromPool(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest equipfrompool <accountId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        uint32 accountId = 0;
+        iss >> accountId;
+
+        if (accountId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest equipfrompool <accountId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->EquipBotFromPool(accountId);
+        handler->PSendSysMessage("[bottest] equipfrompool(account %u): %s - '.bottest status %u' und "
+            "characters.character_inventory (Equip-Slots 0-18) pruefen. Details je Slot in Server.log "
+            "(scripts.bots).", accountId, ok ? "OK (mindestens ein Slot befuellt)" : "FEHLER/0 Slots (siehe Server.log)",
+            accountId);
+        return true;
+    }
+
+    // .bottest groupinvite <botAccountId> [leaderAccountId]
+    // Runde 137 (28.09.2026): EIN einziger Gruppen-Beitritts-Livetest - siehe BotMgr::InviteBotToGroup()
+    // fuer den vollen Code-Review (Design lcf2r136). Urspruenglicher Entwurf (lcf2r136 Abschnitt 4):
+    // nutzt AUTOMATISCH den ausfuehrenden GM-Charakter als Gruppenleiter, wenn der Befehl von einem
+    // echten, eingeloggten Client-GM aus abgesetzt wird (handler->GetSession()->GetPlayer()).
+    // ABWEICHUNG in dieser Runde (dokumentiert): dieser Livetest laeuft ueber die RA-Konsole
+    // (ra_client.ps1), die KEINEN Player-Charakter an den ChatHandler bindet (reine
+    // Account-Remote-Verwaltung, kein In-World-Charakter) - deshalb optionaler zweiter Parameter
+    // <leaderAccountId>, der auf einen bereits per '.bottest login' eingeloggten (Bot-)Account
+    // verweist und dessen Player als Leader nutzt. Ohne diesen Parameter bleibt das urspruengliche
+    // Verhalten (echter GM-Client-Aufrufer) erhalten - vorwaertskompatibel fuer spaetere Runden, in
+    // denen der Nutzer den Befehl selbst im Spiel eingibt.
+    static bool HandleBotTestGroupInvite(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest groupinvite <botAccountId> [leaderAccountId]");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        uint32 botAccountId = 0, leaderAccountId = 0;
+        iss >> botAccountId;
+        iss >> leaderAccountId;
+
+        if (botAccountId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest groupinvite <botAccountId> [leaderAccountId]");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        Player* leader = nullptr;
+        if (leaderAccountId != 0)
+            leader = sBotMgr->GetBotPlayer(leaderAccountId);
+        else if (handler->GetSession() && handler->GetSession()->GetPlayer())
+            leader = handler->GetSession()->GetPlayer();
+
+        if (!leader)
+        {
+            handler->SendSysMessage("[bottest] groupinvite: kein Leader gefunden - entweder als echter GM-Client "
+                "aufrufen (kein Konsolen-/RA-Aufruf moeglich) oder [leaderAccountId] eines bereits "
+                "eingeloggten (Bot-)Accounts angeben.");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->InviteBotToGroup(botAccountId, leader);
+        handler->PSendSysMessage("[bottest] groupinvite(botAccount %u -> Leader '%s'): %s - '.bottest status %u' "
+            "und characters.group_member pruefen.", botAccountId, leader->GetName().c_str(),
+            ok ? "OK (Group::AddMember() erfolgreich)" : "FEHLER (siehe Server.log)", botAccountId);
+        return true;
+    }
+
+    // .bottest groupleave <botAccountId>
+    // Runde 137 (28.09.2026): Gegenstueck zu '.bottest groupinvite' - entfernt den Bot sauber aus
+    // seiner aktuellen Gruppe. Siehe BotMgr::RemoveBotFromGroup().
+    static bool HandleBotTestGroupLeave(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest groupleave <botAccountId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        uint32 botAccountId = uint32(atoi(args));
+        if (botAccountId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest groupleave <botAccountId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->RemoveBotFromGroup(botAccountId);
+        handler->PSendSysMessage("[bottest] groupleave(botAccount %u): %s", botAccountId,
+            ok ? "OK (aus Gruppe entfernt)" : "FEHLER (siehe Server.log)");
+        return true;
+    }
+
+    // .bottest follow <botAccountId> [targetPlayerName]
+    // Runde 137 (28.09.2026): EIN einziger Folgen-KI-Livetest - siehe BotMgr::StartBotFollow() fuer den
+    // vollen Code-Review (Blocker-Check lcf2r136 Abschnitt 5, MotionMaster::MoveFollow()). targetPlayerName
+    // ist optional - ohne Angabe folgt der Bot dem AUSFUEHRENDEN GM-Charakter selbst (der typische
+    // Gruppenleiter-Fall). Synchron ausgeloest, das eigentliche Nachlaufen laeuft tick-gesteuert ueber
+    // den bereits bestaetigten MotionMaster-Update-Zyklus - mit '.bottest status' ueber mehrere Sekunden
+    // verfolgen.
+    static bool HandleBotTestFollow(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest follow <botAccountId> [targetPlayerName] (ohne Name: der ausfuehrende GM selbst)");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        uint32 botAccountId = 0;
+        std::string targetName;
+        iss >> botAccountId;
+        iss >> targetName;
+
+        if (botAccountId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest follow <botAccountId> [targetPlayerName] (ohne Name: der ausfuehrende GM selbst)");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        Player* target = nullptr;
+        if (!targetName.empty())
+        {
+            target = ObjectAccessor::FindPlayerByName(targetName);
+            if (!target)
+            {
+                handler->PSendSysMessage("[bottest] follow: Ziel-Spieler '%s' nicht gefunden/nicht online.", targetName.c_str());
+                handler->SetSentErrorMessage(true);
+                return false;
+            }
+        }
+        else if (handler->GetSession() && handler->GetSession()->GetPlayer())
+            target = handler->GetSession()->GetPlayer();
+
+        if (!target)
+        {
+            handler->SendSysMessage("[bottest] follow: kein Ziel angegeben und kein echter GM-Charakter als "
+                "Aufrufer vorhanden (Konsole) - bitte targetPlayerName explizit angeben.");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->StartBotFollow(botAccountId, target->GetGUID());
+        handler->PSendSysMessage("[bottest] follow(botAccount %u -> Ziel '%s'): %s - '.bottest status %u' ueber "
+            "mehrere Sekunden verfolgen (Position sollte sich dem Ziel annaehern).", botAccountId,
+            target->GetName().c_str(), ok ? "MoveFollow() ausgeloest" : "FEHLER (siehe Server.log)", botAccountId);
+        return true;
+    }
+
+    // .bottest followstop <botAccountId>
+    // Runde 137 (28.09.2026): Notbremse zu '.bottest follow' - siehe BotMgr::StopBotFollow().
+    static bool HandleBotTestFollowStop(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest followstop <botAccountId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        uint32 botAccountId = uint32(atoi(args));
+        if (botAccountId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest followstop <botAccountId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        sBotMgr->StopBotFollow(botAccountId);
+        handler->PSendSysMessage("[bottest] followstop(botAccount %u): Follow abgebrochen (MoveIdle()) - "
+            "'.bottest status %u' pruefen.", botAccountId, botAccountId);
+        return true;
+    }
+
+    // .bottest equipartifact <accountId>
+    // Runde 143 (28.09.2026): EIN einziger Artefaktwaffen-Zuweisungs-Livetest - siehe
+    // BotMgr::EquipBotArtifact() fuer den vollen Code-Review (Design lcf2r138 Teil B). Ermittelt
+    // Klasse+Primaerspezialisierung des Bots automatisch, schlaegt das passende Artefakt-Item aus der
+    // statischen 36er-Zuordnungstabelle nach und ruestet es ueber den bereits in Runde 133 live
+    // bestaetigten EquipBotItem()-Pfad aus - kein itemEntry-Parameter noetig (im Gegensatz zu
+    // '.bottest equip').
+    static bool HandleBotTestEquipArtifact(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest equipartifact <accountId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        uint32 accountId = uint32(atoi(args));
+        if (accountId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest equipartifact <accountId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->EquipBotArtifact(accountId);
+        handler->PSendSysMessage("[bottest] equipartifact(account %u): %s - '.bottest status %u' und "
+            "characters.item_instance (Main-Hand-Slot, GetArtifactID()!=0 erwartet) pruefen.",
+            accountId, ok ? "OK (Artefakt ausgeruestet)" : "FEHLER (siehe Server.log)", accountId);
+        return true;
+    }
+
+    // .bottest skillartifact <accountId> [levelBudget]
+    // Runde 143 (28.09.2026): EIN einziger Artefakt-Skillungs-Livetest - siehe BotMgr::SkillBotArtifact()
+    // fuer den vollen Code-Review. Bot muss vorher per '.bottest equipartifact' eine Artefaktwaffe in
+    // der Main-Hand haben. levelBudget optional - ohne Angabe (oder 0) wird das Rang-Budget automatisch
+    // aus dem aktuellen Bot-Level berechnet (R138 B.3-Faustregel, siehe BotMgr.cpp-Kommentar).
+    static bool HandleBotTestSkillArtifact(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest skillartifact <accountId> [levelBudget] (0/leer = automatisch aus Level berechnet)");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        uint32 accountId = 0, levelBudget = 0;
+        iss >> accountId;
+        iss >> levelBudget;
+
+        if (accountId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest skillartifact <accountId> [levelBudget] (0/leer = automatisch aus Level berechnet)");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->SkillBotArtifact(accountId, levelBudget);
+        handler->PSendSysMessage("[bottest] skillartifact(account %u, levelBudget %u): %s - Server.log "
+            "(scripts.bots) auf 'BotMgr::SkillBotArtifact' Diagnose-Zeile pruefen (vergebene Raenge), "
+            "zusaetzlich characters.item_instance Dynamic-Fields der Waffe.",
+            accountId, levelBudget, ok ? "OK" : "FEHLER (siehe Server.log)");
+        return true;
+    }
+
     // .bottest status <accountId>
     static bool HandleBotTestStatus(ChatHandler* handler, char const* args)
     {
@@ -306,6 +861,14 @@ public:
             handler->PSendSysMessage("[bottest] status(account %u): %s - Player '%s' (%s), Map %u, Position %s",
                 accountId, stateStr, player->GetName().c_str(), player->GetGUID().ToString().c_str(),
                 player->GetMapId(), player->GetPosition().ToString().c_str());
+
+            // Runde 132 (28.09.2026): Tod-Handling-Zustand zusaetzlich sichtbar machen (Auftragsvorgabe
+            // "'.bottest status' muss den korrekten Zustand widerspiegeln") - IsAlive()/PLAYER_FLAGS_GHOST/
+            // Resurrection-Sickness-Aura 15007, damit ein Release/Revive-Livetest ohne DB-Blick prüfbar ist.
+            handler->PSendSysMessage("[bottest] status(account %u): IsAlive()=%u, HasFlag(PLAYER_FLAGS_GHOST)=%u, "
+                "getDeathState()=%u, ResurrectionSickness(Aura 15007)=%u.", accountId, player->IsAlive(),
+                player->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST), uint32(player->getDeathState()),
+                player->HasAura(15007));
 
             if (sBotMgr->IsBotPatrolActive(accountId))
                 handler->PSendSysMessage("[bottest] status(account %u): Patrol AKTIV - Zyklus %u/%u abgeschlossen.",

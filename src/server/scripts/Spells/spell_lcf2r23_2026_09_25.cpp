@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -16,8 +16,9 @@
  */
 
 // Legion-Server round "LCF2 R23" (2026-09-25): rest list of round LCF2.
-// Mechanics checked against an external reference implementation. The code is
-// our own; numbers come from our client 7.3.5.26972 unless a comment names the reference source of a value.
+// Mechanics taken from LegionCore-7.3.5 (github.com/The-Legion-Preservation-Project/LegionCore-7.3.5, derived from the
+// UWOW 2020 leak - used with explicit user permission; local clone C:\LegionServer\downloads\lc_src\repo). The code is
+// our own; numbers come from our client 7.3.5.26972 unless a comment names LegionCore as the source of a value.
 // Binding SQL: C:\LegionServer\fixes\lcf2r23_2026-09-25_scripts.sql - without it every script here is inert.
 
 #include "AreaTrigger.h"
@@ -57,12 +58,12 @@ namespace
 // Our core never created the trail: Windburst 204147 has only damage effects, the trail spell 204475 was not cast
 // by anything, so the "trail of wind that increases the movement speed of allies" (base ability text) and Cyclonic
 // Burst ("The trail of wind left by Windburst deals ... to enemies within") were missing.
-// the reference core spell_hunter.cpp spell_hun_windburst (AfterCast: cast 204475) + areatrigger_hun_windburst (AT of 204475):
+// LegionCore spell_hunter.cpp spell_hun_windburst (AfterCast: cast 204475) + areatrigger_hun_windburst (AT of 204475):
 //   friendly unit enters -> 204477 with the AT's remaining duration; enemy enters and the hunter has 238124 ->
 //   242712 with the AT's remaining duration; leaving the AT removes both.
-// Differences to the reference core (on purpose): the reference core resizes the polygon to the distance hunter -> target; we keep
+// Differences to LegionCore (on purpose): LegionCore resizes the polygon to the distance hunter -> target; we keep
 // our sniffed polygon of template 10713 (-3..+29 yd x 4 yd) and only turn it so it points from the target back to
-// the hunter (204475 targets TARGET_DEST_TARGET_ENEMY, so the AT stands at the target). the reference core's extra ground
+// the hunter (204475 targets TARGET_DEST_TARGET_ENEMY, so the AT stands at the target). LegionCore's extra ground
 // visuals 223114/226872 every 5 yd are not cast.
 // ============================================================================================================
 class spell_r23_hun_windburst_trail : public SpellScript
@@ -144,8 +145,8 @@ struct at_r23_hun_windburst : AreaTriggerAI
 // ============================================================================================================
 // Warlock (Destruction): Flame Rift (238146) "Dimensional Rift can now summon a powerful Flame Rift."
 // The 4th choice of Dimensional Rift is in spell_artifact.cpp (spell_arti_warl_dimensional_rift). This is the rift.
-// the reference core: spell_pet_auras 121643 -> 31366 (root), 243045 (look), 243046 (Searing Bolts); SpellMgr.cpp turns
-// 243046 into a PERIODIC_DUMMY with a 500 ms period (the reference core value - the client has no period), and
+// LegionCore: spell_pet_auras 121643 -> 31366 (root), 243045 (look), 243046 (Searing Bolts); SpellMgr.cpp turns
+// 243046 into a PERIODIC_DUMMY with a 500 ms period (LegionCore value - the client has no period), and
 // spell_warlock.cpp spell_warl_searing_bolts casts 243050 at the rift's target on every tick with the warlock as
 // original caster. Number of bolts = 243046 duration (client 10 s) / 500 ms = 20. The rift itself lives for the
 // client duration of 242983 (40 s).
@@ -154,7 +155,7 @@ struct npc_r23_warl_flame_rift : public ScriptedAI
 {
     npc_r23_warl_flame_rift(Creature* creature) : ScriptedAI(creature) { }
 
-    static constexpr uint32 BOLT_PERIOD = 500; // the reference core SpellMgr.cpp ApplySpellFix 243046
+    static constexpr uint32 BOLT_PERIOD = 500; // LegionCore SpellMgr.cpp ApplySpellFix 243046
 
     uint32 _timer = 0;
     uint32 _boltsLeft = 0;
@@ -201,7 +202,7 @@ struct npc_r23_warl_flame_rift : public ScriptedAI
 
 // ============================================================================================================
 // Warrior (Arms): Precise Strikes (248579) "Colossus Smash increases the critical strike chance of your next Mortal
-// Strike or Execute by $s1%."  the reference core spell_trigger 248579 -> 248195, spell_proc_event 248579 = Colossus Smash
+// Strike or Execute by $s1%."  LegionCore spell_trigger 248579 -> 248195, spell_proc_event 248579 = Colossus Smash
 // (class mask [1] 0x40000000 = 167105) and Warbreaker ([3] 0x8000 = 209577). 248195 (client) carries the crit
 // modifier for Mortal Strike/Execute; it is consumed by gen_arti_war_precise_strikes (spell_artifact_traits_gen.cpp).
 // ============================================================================================================

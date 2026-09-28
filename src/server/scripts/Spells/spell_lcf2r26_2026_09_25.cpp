@@ -15,9 +15,10 @@
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
-// Legion-Server round "LCF2 R26" (2026-09-25): quest credits that a reference implementation only grants from its
-// compiled C++ (list: reports\lcf2r25_2026-09-25_quest_credit_endstand.tsv, status "Kandidat R26").
-// Logic ported from that reference implementation:
+// Legion-Server round "LCF2 R26" (2026-09-25): quest credits that LegionCore-7.3.5 only grants from its compiled C++
+// (list: reports\lcf2r25_2026-09-25_quest_credit_endstand.tsv, status "Kandidat R26 (LC-C++)").
+// Logic ported from LegionCore-7.3.5 (github.com/The-Legion-Preservation-Project/LegionCore-7.3.5, derived from the
+// UWOW 2020 leak - used with explicit user permission; local clone C:\LegionServer\downloads\lc_src\repo):
 //   scripts/Legion/warden_prison.cpp (npc_q38723, npc_q39683, npc_dh_questgiver_96675, go_q39687,
 //   npc_dh_questgiver_97644, npc_q39694), scripts/World/npcs_special.cpp (npc_iot_ritual_stone),
 //   scripts/EasternKingdoms/zone_stormwind_city.cpp + scripts/Kalimdor/zone_durotar.cpp (Spectral Sight credit).

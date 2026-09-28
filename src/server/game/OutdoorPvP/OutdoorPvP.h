@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -32,7 +32,7 @@ enum OutdoorPvPTypes
     OUTDOOR_PVP_TF = 3,
     OUTDOOR_PVP_ZM = 4,
     OUTDOOR_PVP_SI = 5,
-    // Legion-Server round 44: ported from the reference core's OutdoorPVPArgusInvasion (invasion_point_argus.cpp).
+    // Legion-Server round 44: ported from LegionCore's OutdoorPVPArgusInvasion (invasion_point_argus.cpp).
     OUTDOOR_PVP_ARGUS_INVASION = 6
 };
 
@@ -228,7 +228,7 @@ class TC_GAME_API OutdoorPvP : public ZoneScript
         virtual bool SetupOutdoorPvP() {return true;}
 
         // Legion-Server round 43: additive hooks for multi-zone OutdoorPvP subclasses that own their own
-        // per-zone Scenario objects (ported from the reference core's OutdoorPVPArgusInvasion). Empty default body -
+        // per-zone Scenario objects (ported from LegionCore's OutdoorPVPArgusInvasion). Empty default body -
         // the 5 existing zone scripts (HP/NA/TF/ZM/SI) do not override these, so this is a zero behavior change
         // for them. Initialize() is meant to be called lazily by the subclass itself (e.g. from its own
         // HandlePlayerEnterZone override) the first time a given zoneId is seen - it is NOT invoked
@@ -245,7 +245,7 @@ class TC_GAME_API OutdoorPvP : public ZoneScript
         // 5 existing zones (none of them override these).
         // SetData(zone, step) here is intentionally the same (uint32,uint32) signature as ZoneScript::SetData()
         // (which OutdoorPvP inherits) but reinterprets the arguments as (zoneId, scenarioStepIndex) instead of a
-        // generic (DataId, Value) store - this mirrors the reference core's own OutdoorPvP.h. Confirmed safe: nothing in
+        // generic (DataId, Value) store - this mirrors LegionCore's own OutdoorPvP.h. Confirmed safe: nothing in
         // our codebase calls ->SetData()/->GetData() through a ZoneScript* that could resolve to an OutdoorPvP
         // instance (checked call sites of OutdoorPvPMgr::GetZoneScript() and Object::m_zoneScript).
         virtual void SetData(uint32 /*zone*/, uint32 /*step*/) { }

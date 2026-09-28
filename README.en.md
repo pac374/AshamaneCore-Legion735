@@ -51,6 +51,10 @@ Anyone who wants to run this code themselves also needs their **own, non-public 
 (see [Setup / Build](#setup--build)). Without it the server compiles and starts, but a large part of the
 Legion content (class halls, world quests, many NPC spawns) is missing or incomplete.
 
+For personal use (device changes, redundancy), full database dumps (`world`, `characters`, `hotfixes`, `auth`)
+are additionally kept locally and in a **private** GitHub repository - deliberately private, for the exact same
+copyright reason as above.
+
 ## What works - detailed breakdown
 
 This breakdown is based on more than 60 internal work rounds ("LCF2 rounds", documented internally in
@@ -106,7 +110,10 @@ for why it's an interpretation:
   (the relic forge). The network protocol for the native window is only known from leak sources and hasn't
   been independently confirmed - the C++ code for the native variant already exists
   (`NetherlightCrucible.cpp/.h`, config switch `NetherlightCrucible.ClientUI`, off by default), but is
-  untested and disabled. See the comment in `src/server/worldserver/worldserver.conf.dist`.
+  untested and disabled. See the comment in `src/server/worldserver/worldserver.conf.dist`. Every cheap
+  research avenue (code/web search, the official Lua API, known leak forks - all copies of the same
+  unconfirmed source) has been exhausted; client-binary analysis would likely yield new information but is
+  deliberately deferred for now.
 - **Some trait values/timings (Doom Wolves, Echoing Stars)** are based on SimulationCraft community values
   rather than a confirmed Blizzard source (SimC itself flags one of these values in its own source code as a
   provisional placeholder).
@@ -150,55 +157,62 @@ a contributor immediately knows where they could pick up:
 
 ### d) Actively in development
 
-Code under `src/server/scripts/Custom/Bots/` (`BotMgr.h/.cpp`, `BotCharacter.h/.cpp`, `bot_scriptloader.cpp`,
-`bot_commandscript.cpp`) plus three small, additive changes in `src/server/game/Server/WorldSession.h/.cpp`.
-Goal: a custom Playerbots module modeled on AzerothCore's `mod-playerbots` - bot-controlled player characters
-("session faking": a real `Player` object on a socket-less `WorldSession`, not a `Creature`-based NPC bot).
-Unlike the points under (c), this is **not a blocker or a research question**, but an ongoing build with a
-working, deliberately incomplete milestone ("Phase 1") - hence its own section instead of (b) or (c).
+Code under `src/server/scripts/Custom/Bots/` (`BotMgr.h/.cpp`, `bot_commandscript.cpp`) plus small, additive
+changes in `src/server/game/Server/WorldSession.h/.cpp`. Goal: a custom Playerbots module modeled on
+AzerothCore's `mod-playerbots` - bot-controlled player characters ("session faking": a real `Player` object on
+a socket-less `WorldSession`, not a `Creature`-based NPC bot) that fight, gear up, join the player's own
+group/LFR, and quest. Unlike the points under (c), this is **not a blocker or a research question**, but an
+ongoing build with a working, deliberately incomplete milestone - hence its own section instead of (b) or (c).
 
 **What works (confirmed live on the production server multiple times, via GM test commands `.bottest ...`):**
 
-- **Login**: a bot account/character can log in without a real WoW client (`.bottest login`) - a real `Player`
-  object, a real position in the world, not a fake NPC.
-- **Logout**: clean logout during normal operation (`.bottest logout`), the online flags in `auth.account` and
-  `characters.characters` are reset correctly.
-- **Shutdown**: a controlled server shutdown with a logged-in, active bot completes without leaving the bot
-  state inconsistent or crashing the server.
-- **Single movement**: the bot can move in a straight line (`.bottest move`, `MotionMaster::MovePoint()`
-  without pathfinding).
-- **Commuting**: several consecutive movement cycles between two points (`.bottest patrol <n>`), including
-  arrival detection and clean cycle completion.
-- **Pathfinding**: movement over the real navmesh (`.bottest movepath`, Recast/Detour path calculation instead
-  of a straight line).
+- **Login/logout/shutdown**: bot account/character logs in/out without a real client (`.bottest login|logout`),
+  online flags reset correctly, no crash on a controlled server shutdown with an active bot.
+- **Movement**: straight-line (`.bottest move`), commuting (`.bottest patrol <n>`), real navmesh pathfinding
+  (`.bottest movepath`, Recast/Detour).
+- **Combat**: a bot can attack and kill a target (`Unit::ApplySpellImmune`-based invulnerability test mode,
+  `.bottest invuln`, so unarmored test characters don't die to the counter-hit). Known limitation: moving/
+  critter targets (`type=8`) are currently still lost because `StartBotAttack()` doesn't follow up with
+  `MotionMaster::MoveChase()` (documented open item, not hidden).
+- **Death/revival**: full cycle (`HandleBotDeath()`/`ReviveBotAtGraveyard()`, `.bottest release|revive`),
+  including correct graveyard teleport.
+- **Equipment**: bots wear level-appropriate gear from creation, randomly rolled from a quality pool
+  (`EquipBotItem()`/`EquipBotFromPool()`, `.bottest equip|equipfrompool`). The pool
+  (`world.bot_equipment_pool`, 58,705 entries across 6 level bands x 4 quality tiers, generated from local
+  client DB2 data) and each bot's one-time, permanent quality tier (`characters.bot_gear_tier`, pyramid-shaped
+  distribution: most bots poorly/moderately geared, few epic) are deliberately chosen so bots need no active
+  loot/play behavior - they're pure group/LFR filler, not an independent progression target.
+- **Group/LFR (tier 1)**: a bot can join/leave the player's group (`Group::AddMember()` called directly,
+  `.bottest groupinvite|groupleave`) and follow it via real `MotionMaster::MoveFollow()`
+  (`.bottest follow|followstop`), verified repeatedly over extended periods.
 
-All six mechanisms have been confirmed reproducible individually AND together, across several complete
-regression runs under the current production binary (without diagnostic special flags) - not a simulation,
-real live tests against the running server.
+**What doesn't exist yet:**
 
-**What doesn't work (yet) / doesn't exist:**
+- **No autonomous state machine**: every action is triggered individually via a GM command, no self-contained
+  life cycle.
+- **LFG pool matchmaking** (bots sit actively in the dungeon-finder pool, group auto-assembled to match the
+  player's level/ilvl) is designed but not yet implemented.
+- **Artifact weapons for bots** (assignment + level-appropriate leveling) is in progress.
+- **Quest AI** has not been started yet (deliberately ordered after group/LFR).
+- A bot loot system was **deliberately not built** (decision): bots get their gear exclusively through the
+  equipment pool - active looting would be unnecessary effort for pure group/LFR filler bots with no benefit.
 
-- **No real combat behavior**: no auto-attack, no spell casting, no threat management, no handling of
-  death/resurrection - an as-yet untested risk area.
-- **No state machine / autonomous behavior**: the bot does nothing on its own. Every action (login, movement,
-  logout) has to be triggered individually via a GM command - there is no self-contained life cycle ("logs in,
-  patrols for a while, logs out again by itself").
-- **No group/AI logic**: no following, no role assignment (tank/heal/DD), no decision logic of any kind - pure
-  test infrastructure, not bot behavior in the proper sense.
-- The test infrastructure itself (GM command
-  `.bottest createaccount|createchar|login|logout|move|movepath|patrol|status`) is deliberately manual/
-  step-by-step, not intended for production use.
+**Four independent, structural bugs found and fixed** (not just worked around symptomatically - potentially
+interesting for other TrinityCore developers attempting something similar):
 
-**Three independent, structural crash causes found and fixed** (not just worked around symptomatically -
-potentially interesting for other TrinityCore developers attempting something similar):
+1. **`groups` has been a reserved keyword since MySQL 8.0.2**: `GroupMgr::LoadGroups()` referenced the table
+   unquoted in two places (`SELECT guid FROM groups`), which caused a reproducible crash on server startup as
+   soon as real group data existed for the first time (triggered by the new group-join feature). Fix: both
+   spots quoted with backticks (`` FROM `groups` ``) - every other reference in the same file was already
+   correctly quoted; this was two isolated lines.
 
-1. **Null pointer on the socket idle check**: `WorldSession::Update()` unconditionally calls
+2. **Null pointer on the socket idle check**: `WorldSession::Update()` unconditionally calls
    `m_Socket[CONNECTION_TYPE_REALM]->CloseSocket()` once the idle timeout has expired - for a session without
    a real socket (`socket == nullptr`, which a socket-less bot inevitably has), that's a guaranteed null-pointer
    access that crashes the entire `worldserver` process the first time this session ever runs through the
    regular update cycle. Fix: an `IsBotSession()` guard skips the idle-kick entirely for bot sessions (purely
    additive, no behavior change for real players).
-2. **DB access in the `WorldSession` destructor after the DB pool was already closed (finding 1)**: if the
+3. **DB access in the `WorldSession` destructor after the DB pool was already closed (finding 1)**: if the
    destructor of a still-logged-in bot session runs very late (e.g. in a singleton manager's `atexit` window,
    AFTER `main()` has returned), the DB pools (`CharacterDatabase` etc.) have already been closed via
    `StopDB()` and their internal `boost::asio` executor already destroyed - a `LogoutPlayer()->SaveToDB()` call
@@ -206,7 +220,7 @@ potentially interesting for other TrinityCore developers attempting something si
    the actual clean logout (including the DB write) now happens beforehand, synchronously within `main()` and
    guaranteed before any DB pool teardown (`WorldScript::OnShutdown()` -> `BotMgr::LogoutAllBots()`); the
    destructor itself is now, for bot sessions, entirely free of DB access.
-3. **DB access in the `WorldSession` destructor after the DB pool was already closed (finding 2, independent)**:
+4. **DB access in the `WorldSession` destructor after the DB pool was already closed (finding 2, independent)**:
    the same destructor contained a second, independent unconditional database write
    (`LoginDatabase.PExecute("UPDATE account SET online = 0 ...")`) that ran for every session regardless of
    player state - in the same late time window, also an access to an already-closed DB pool. Fixed the same

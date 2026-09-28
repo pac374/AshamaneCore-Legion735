@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  * Copyright (C) 2005-2009 MaNGOS <http://getmangos.com/>
  *
@@ -148,7 +148,7 @@ bool GameEventMgr::StartEvent(uint16 event_id, bool overwrite)
         // When event is started, set its worldstate to current time
         sWorld->setWorldState(event_id, time(NULL));
         // Legion-Server round 44: additive, needed so OutdoorPvPArgusInvasion zones reset their timer when their
-        // owning game_event starts (ported from the reference core's GameEventMgr.cpp). No-op for every other OutdoorPvP
+        // owning game_event starts (ported from LegionCore's GameEventMgr.cpp). No-op for every other OutdoorPvP
         // zone (HP/NA/TF/ZM/SI) - their HandleGameEventStart() default body is empty (see OutdoorPvP.h R44).
         sOutdoorPvPMgr->HandleGameEventStart(event_id);
         return false;

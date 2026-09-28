@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2017-2018 AshamaneProject <https://github.com/AshamaneProject>
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
@@ -2294,7 +2294,7 @@ public:
             p_AbsorbAmount = 0; //This is set at 0 because we don't want to absorb
 
             // Skeletal Shattering (artifact trait 192558): "Each time Bone Shield absorbs damage, it has a chance equal to
-            // your Critical Strike chance to absorb an additional $s1% of the damage." Mechanic as in the reference core
+            // your Critical Strike chance to absorb an additional $s1% of the damage." Mechanic as in LegionCore-7.3.5
             // spell_dk_bone_shield (Round LCF 25.09.2026); the percentage is the trait aura value (client base points
             // as fallback). Without the trait nothing changes.
             if (Unit* target = GetTarget())

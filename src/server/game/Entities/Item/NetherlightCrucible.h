@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Legion-Server 2026-09-24 (Runde 14): server-side Netherlight Crucible (7.3 relic talents).
  *
  * The client protocol of the real Relic Forge UI (CMSG_ARTIFACT_ADD_RELIC_TALENT / ..._ATTUNE_*, the layout of
@@ -97,18 +97,18 @@ namespace NetherlightCrucible
     // With 1: go_netherlight_crucible lets GameObject::Use run, which sends SMSG_ARTIFACT_FORGE_OPENED; GO 273272 has
     // Data5 ForgeType = 1 ("Relic Forge", GameObjectData.h enum) so the client opens its relic forge window.
     //
-    // Source of the wire format: the reference core (a community fork for build 26972),
+    // Source of the wire format: LegionCore-7.3.5 (community fork of the 2020 UWOW core source, build 26972),
     // ArtifactPackets.cpp / ArtifactHandler.cpp / Item.cpp (GetArtifactSockets, CreateSocketTalents,
     // AddOrRemoveSocketTalent). Single lineage (DestinyCore carries the same code), NOT confirmed by a sniff.
     // ITEM_DYNAMIC_FIELD_RELIC_TALENT_DATA, 6 uint32 per relic slot at offset slot * 6:
-    //   [0] 1 (the reference core "unk1", always 1 when created)
+    //   [0] 1 (LegionCore "unk1", always 1 when created)
     //   [1] socket index = relic (gem) slot + 2
-    //   [2] (RelicTalent ID of talent 0 << 16) | chosen mask (bit i = talent index i chosen); the reference core creates 65536
+    //   [2] (RelicTalent ID of talent 0 << 16) | chosen mask (bit i = talent index i chosen); LegionCore creates 65536
     //       = ID 1 << 16 = the Type-0 row of RelicTalent.db2 (Netherlight Fortification) - consistent with the client data
     //   [3] (RelicTalent ID of talent 2 (light) << 16) | RelicTalent ID of talent 1 (shadow)
     //   [4] (RelicTalent ID of talent 4 << 16) | RelicTalent ID of talent 3
     //   [5] RelicTalent ID of talent 5
-    // Talent index order = ItemRelicTalentData::Options order (Blizzard UI TALENTS_LAYOUT, 0-based) - the reference core uses the
+    // Talent index order = ItemRelicTalentData::Options order (Blizzard UI TALENTS_LAYOUT, 0-based) - LegionCore uses the
     // same mapping (1 = shadow = low half of [3], 2 = light = high half, cross-checked against RelicTalent.db2 types).
     bool IsClientUIEnabled();
     void UpdateClientField(Item* artifact);

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -15,8 +15,9 @@
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
-// Legion-Server round "LCF2 R24" (2026-09-25): DBErrors.log compared against an external reference implementation + rest list of R23.
-// Mechanics checked against that reference implementation and, where
+// Legion-Server round "LCF2 R24" (2026-09-25): DBErrors.log compared against LegionCore-7.3.5 + rest list of R23.
+// Mechanics taken from LegionCore-7.3.5 (github.com/The-Legion-Preservation-Project/LegionCore-7.3.5, derived from the
+// UWOW 2020 leak - used with explicit user permission; local clone C:\LegionServer\downloads\lc_src\repo) and, where
 // named, SimulationCraft legion-dev. The code is our own; numbers come from our client 7.3.5.26972.
 // Binding SQL: C:\LegionServer\fixes\lcf2r24_2026-09-25_scripts.sql - without it every script here is inert
 // (exception: spell_dk_army_of_the_dead, whose binding to 42651 already exists in the live world DB).
@@ -58,7 +59,7 @@ namespace
 // Client 194310: "A pustulent lesion that will burst on death or when damaged by Scourge Strike, dealing $194311s1 Shadow
 // damage and generating $195757s1 Runic Power." Our core burst every wound with 194311 but never cast 195757, so bursting
 // wounds generated no runic power at all (Scourge Strike, Clawing Shadows, Castigator, Black Claws, Apocalypse).
-// the reference core (spell_dk.cpp: scourge strike / apocalypse / black claws / spell_dk_festering_wound_dummy) casts 195757 on the
+// LegionCore (spell_dk.cpp: scourge strike / apocalypse / black claws / spell_dk_festering_wound_dummy) casts 195757 on the
 // death knight for each burst and, on the target's death, once per remaining stack.
 // ============================================================================================================
 
@@ -121,8 +122,8 @@ class spell_r24_dk_festering_wound_death : public AuraScript
 // Client: "Strikes the enemy, dealing $sw1 Physical damage and bursting up to $s3 Festering Wounds on the target,
 // summoning a member of your Army of the Dead for $221180d for each burst Festering Wound." E2 is a DUMMY with 6 (the
 // cap) - nothing in our core handled it, so Apocalypse only dealt its weapon damage (no burst, no ghouls).
-// the reference core spell_dk_apocalypse: on the weapon-damage hit, for min(stacks, E2) wounds: burst (194311) + ghoul 205491
-// on the target, then remove the burst stacks. the reference core's PvP cap (4) is not taken over (no PvP scalar here).
+// LegionCore spell_dk_apocalypse: on the weapon-damage hit, for min(stacks, E2) wounds: burst (194311) + ghoul 205491
+// on the target, then remove the burst stacks. LegionCore's PvP cap (4) is not taken over (no PvP scalar here).
 // Runic power of the bursts comes from spell_r24_dk_festering_wound_burst.
 // ============================================================================================================
 class spell_r24_dk_apocalypse : public SpellScript
@@ -171,7 +172,7 @@ class spell_r24_dk_apocalypse : public SpellScript
 // ============================================================================================================
 // Death Knight: T20 Unholy 2P (242064) "Master of Ghouls".
 // The world DB always bound 'spell_dk_army_of_the_dead' to 42651, but our core had no such script (DBErrors.log:
-// "ScriptName 'spell_dk_army_of_the_dead' exists in database, but no core script found!"). the reference core's script of that
+// "ScriptName 'spell_dk_army_of_the_dead' exists in database, but no core script found!"). LegionCore's script of that
 // name (spell_dk.cpp, 42651 + 205491) implements the set bonus; SimC (sc_death_knight.cpp, army + apocalypse ghouls
 // -> buffs.t20_2pc_unholy->trigger()) confirms that both Army of the Dead and Apocalypse ghouls count.
 // Client: 246995 lasts 3 s, text "Duration extends and does not stack" -> +3 s per ghoul.
@@ -213,10 +214,10 @@ class spell_dk_army_of_the_dead : public SpellScript
 // ============================================================================================================
 // Priest (Shadow): Void Torrent (205065) "Insanity does not drain during this channel."
 // Our Voidform (spell_pri_voidform, 194249) drains through 194249 E1 (MOD_POWER_REGEN insanity, x stacks) and nothing
-// paused it. the reference core (spell_pri_voidform CallSpecialFunction, SpellAuras.cpp case 205065) locks the drain while
+// paused it. LegionCore (spell_pri_voidform CallSpecialFunction, SpellAuras.cpp case 205065) locks the drain while
 // the priest has 205065. Here: E1 of 194249 is set to 0 while the channel runs (spell_pri_voidform re-applies the 0
 // after each stack tick, spell_priest.cpp) and recalculated from the stacks when the channel ends.
-// Difference to the reference core: there the drain growth pauses too; here the drain resumes at the stack-based value.
+// Difference to LegionCore: there the drain growth pauses too; here the drain resumes at the stack-based value.
 // ============================================================================================================
 class spell_r24_pri_void_torrent : public AuraScript
 {
@@ -250,14 +251,14 @@ class spell_r24_pri_void_torrent : public AuraScript
 // ============================================================================================================
 // Shaman (Restoration): Gift of the Queen (207778) "Heals up to six injured allies within $A1 yards ...".
 // The client has no MaxTargets for 207778 (SpellTargetRestrictions 30075: MaxTargets 0), so our core healed and buffed
-// every ally in the area. the reference core caps it with spell_target_filter (count 6, effect mask 7). "Injured" is taken from
+// every ally in the area. LegionCore caps it with spell_target_filter (count 6, effect mask 7). "Injured" is taken from
 // the tooltip: injured allies first, lowest health percentage first; E1 (max health buff) gets the same six.
 // ============================================================================================================
 class spell_r24_sha_gift_of_the_queen : public SpellScript
 {
     PrepareSpellScript(spell_r24_sha_gift_of_the_queen);
 
-    static constexpr size_t MAX_TARGETS = 6; // tooltip "up to six", the reference core spell_target_filter count 6
+    static constexpr size_t MAX_TARGETS = 6; // tooltip "up to six", LegionCore spell_target_filter count 6
 
     GuidList _selected;
 
@@ -308,7 +309,7 @@ class spell_r24_sha_gift_of_the_queen : public SpellScript
 // Shaman: Earth Shield honor talent (204288). Client: E0 -10 % damage taken (core handles), E1 DUMMY 4 = "causes the
 // target to be healed for $204290s1 when they take an attack equal to $m2% of their total health. $N Charges."
 // (4 charges, proc on damage taken). Nothing handled E1 (our 'spell_sha_earth_shield' is the old 974 version, unbound).
-// the reference core spell_sha_earth_shield (204288): heal 204290 from the shaman when a hit from someone else reaches E1 % of
+// LegionCore spell_sha_earth_shield (204288): heal 204290 from the shaman when a hit from someone else reaches E1 % of
 // max health. Here the check is in DoCheckProc, so only such hits use up a charge.
 // ============================================================================================================
 class spell_r24_sha_earth_shield : public AuraScript

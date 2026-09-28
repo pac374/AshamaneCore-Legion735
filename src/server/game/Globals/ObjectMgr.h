@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  * Copyright (C) 2005-2009 MaNGOS <http://getmangos.com/>
  *
@@ -133,7 +133,7 @@ enum ScriptCommands
     SCRIPT_COMMAND_MOVEMENT              = 35,               // source = Creature, datalong = MovementType, datalong2 = MovementDistance (wander_distance f.ex.), dataint = pathid
     SCRIPT_COMMAND_PLAY_ANIMKIT          = 36,               // source = Creature, datalong = AnimKit id
 
-    // Legion-Server round 50: bridge to Scenario::SendScenarioEvent, mirrors the reference core event_scripts command 39
+    // Legion-Server round 50: bridge to Scenario::SendScenarioEvent, mirrors LegionCore event_scripts command 39
     // (datalong=92 type marker, datalong2=eventId) - only the event id is kept on import, the "92" marker is dropped.
     SCRIPT_COMMAND_SEND_SCENARIO_EVENT   = 37                // source/target = Player, datalong = scenario event id
 };

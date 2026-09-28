@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -64,7 +64,7 @@ class TC_GAME_API Scenario : public CriteriaHandler
         void SetStep(ScenarioStepEntry const* step);
 
         // Legion-Server round 43: thin adapters used by OutdoorPvP-owned multi-zone scenarios (ported from
-        // the reference core's OutdoorPVPArgusInvasion). Not used by the dungeon/InstanceScenario path.
+        // LegionCore's OutdoorPVPArgusInvasion). Not used by the dungeon/InstanceScenario path.
         void SetOutdoorPvP(OutdoorPvP* outdoorPvP, uint32 zoneId) { _ownerOutdoorPvP = outdoorPvP; _ownerZoneId = zoneId; }
         void SetCurrentStep(uint8 stepIndex);
         void SendStepUpdate(Player* player, bool /*sendFull*/ = true) { SendScenarioState(player); }

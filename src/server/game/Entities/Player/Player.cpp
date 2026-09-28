@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  * Copyright (C) 2005-2009 MaNGOS <http://getmangos.com/>
  *
@@ -8943,7 +8943,7 @@ void Player::SendLoot(ObjectGuid guid, LootType loot_type, bool aeLooting/* = fa
             else if (loot_type == LOOT_FISHING_JUNK)
                 go->getFishLootJunk(loot, this);
             // Round LCF2 R24: fishing pools without an own loot id (all Legion schools 246488-246493 have Data1 = 0, in our
-            // DB as in the reference core) gave an empty loot window - fall back to the zone fishing loot of the pool's position,
+            // DB as in LegionCore) gave an empty loot window - fall back to the zone fishing loot of the pool's position,
             // i.e. the same catch as fishing next to the pool.
             else if (loot_type == LOOT_FISHINGHOLE && !lootid)
             {

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -67,8 +67,9 @@ namespace WorldPackets
             ObjectGuid NpcGUID;
         };
 
-        // Relic Forge / Netherlight Crucible (round 19, 25.09.2026). Field order and types from an external reference
-        // implementation (community fork for build 26972); same order as every other artifact CMSG:
+        // Relic Forge / Netherlight Crucible (round 19, 25.09.2026). Field order and types from LegionCore-7.3.5
+        // (github.com/The-Legion-Preservation-Project/LegionCore-7.3.5, src/server/game/Server/Packets/ArtifactPackets.cpp,
+        // a community fork of the 2020 UWOW core source for build 26972); same order as every other artifact CMSG:
         // item guid, forge guid, then the lua arguments (Blizzard 7.3.5 API doc: AddRelicTalent(slotIndex, talentIndex),
         // AttuneSocketedRelic(relicSlotIndex), AttunePreviewRelic()). Only reached with NetherlightCrucible.ClientUI = 1.
         class ArtifactAddRelicTalent final : public ClientPacket
@@ -80,7 +81,7 @@ namespace WorldPackets
 
             ObjectGuid ArtifactGUID;
             ObjectGuid ForgeGUID;
-            uint32 SlotIndex = 0;       // the reference core: relic (gem) slot + 2
+            uint32 SlotIndex = 0;       // LegionCore: relic (gem) slot + 2
             uint8 TalentIndex = 0;      // 0..5, UI order (row 1 / row 2 shadow, light / row 3)
         };
 
@@ -93,7 +94,7 @@ namespace WorldPackets
 
             ObjectGuid ArtifactGUID;
             ObjectGuid ForgeGUID;
-            uint32 RelicSlotIndex = 0;  // the reference core: relic (gem) slot + 2
+            uint32 RelicSlotIndex = 0;  // LegionCore: relic (gem) slot + 2
         };
 
         class ArtifactAttunePreviewRelic final : public ClientPacket

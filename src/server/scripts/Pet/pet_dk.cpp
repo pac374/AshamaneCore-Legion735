@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -38,9 +38,9 @@ enum DeathKnightSpells
     NPC_DK_ARMY_OF_THE_DEAD_GHOUL   = 24207,
 
     // Legion-Server round LCF2 (2026-09-25), see spell_lcf2_2026_09_25.cpp for the sources
-    SPELL_DK_ARMY_GHOUL_CLAW        = 199373, // the reference core creature_template 24207 spell1; client: 40 energy
+    SPELL_DK_ARMY_GHOUL_CLAW        = 199373, // LegionCore creature_template 24207 spell1; client: 40 energy
     SPELL_DK_PORTAL_TO_UNDERWORLD   = 191637, // artifact trait
-    SPELL_DK_DRAGGED_TO_HELHEIM     = 218321, // the reference core spell_pet_auras 24207 -218321 (on unsummon) with 191637
+    SPELL_DK_DRAGGED_TO_HELHEIM     = 218321, // LegionCore spell_pet_auras 24207 -218321 (on unsummon) with 191637
     SPELL_DK_ARMIES_OF_THE_DAMNED   = 191731, // artifact trait
 };
 
@@ -228,7 +228,7 @@ public:
             });
         }
 
-        // Portal to the Underworld (191637): "Your Army of the Dead Ghouls explode when they die". the reference core casts
+        // Portal to the Underworld (191637): "Your Army of the Dead Ghouls explode when they die". LegionCore casts
         // 218321 when the ghoul is unsummoned (spell_pet_auras, negative spell id), SimulationCraft on dismiss (expired
         // or killed). Ours are unattackable, so the normal end is the summon timer running out - explode just before.
         bool _exploded = false;
@@ -257,7 +257,7 @@ public:
 
             if (UpdateVictim())
             {
-                // Claw (199373, 40 energy) - the Army ghoul's attack spell (the reference core creature_template.spell1).
+                // Claw (199373, 40 energy) - the Army ghoul's attack spell (LegionCore creature_template.spell1).
                 // Armies of the Damned (191731) needs it: its extra effects hang on the Claw hit (spell_dk_claw_owner).
                 Unit* victim = me->GetVictim();
                 if (victim && !me->HasUnitState(UNIT_STATE_CASTING) && me->GetPower(POWER_ENERGY) >= 40 && me->IsWithinMeleeRange(victim))

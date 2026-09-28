@@ -1,7 +1,7 @@
-﻿/*
+/*
  * Legion-Server LCF2 - Round 44.
  *
- * Ported from the reference core's OutdoorPVPArgusInvasion (invasion_point_argus.cpp, class body originally at LC source
+ * Ported from LegionCore's OutdoorPVPArgusInvasion (invasion_point_argus.cpp, class body originally at LC source
  * line 4105-4890). This is a from-scratch port onto our own OutdoorPvP/Scenario base classes (extended in R43),
  * NOT a copy-paste - LC's own OutdoorPvP base is zone-indexed with signature (ObjectGuid, uint32) while ours is
  * (Player*, Area*); LC's Scenario/OutdoorPvP classes also carry extra virtuals (SetData(zone,step),
