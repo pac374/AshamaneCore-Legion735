@@ -17,6 +17,7 @@ Dieses Repository enthaelt den **C++-Quellcode**: eigene GM-Commands, SmartAI-Er
   * [b) Funktioniert, aber eigene Interpretation](#b-funktioniert-aber-eigene-interpretation--nicht-100--blizzlike)
   * [c) Bewusst offen / ungeloest](#c-bewusst-offen--ungeloest-mit-grund)
   * [d) In aktiver Entwicklung](#d-in-aktiver-entwicklung)
+  * [e) Roadmap](#e-roadmap---naechste-bausteine-inspiriert-von-aber-neu-gebaut-gegenueber-3.3.5-community-modulen)
 * [Setup / Build](#setup--build)
 * [Mitarbeit](#mitarbeit)
 
@@ -185,17 +186,33 @@ Zwischenstand - deshalb ein eigener Abschnitt statt (b) oder (c).
   `MotionMaster::MoveFollow()` folgen (`.bottest follow|followstop`), mehrfach ueber laengere Zeitraeume
   verifiziert.
 
+**Zwischenzeitlich ergaenzt (seit dem letzten Stand dieses Abschnitts):**
+
+- **LFG-Pool-Matchmaking**: Bots stehen jetzt solo im regulaeren `LFGMgr`-Warteschlangensystem und werden per
+  Lazy-Nachfuell-Trigger passend zu wartenden echten Spielern eingereiht (`BotMgr::TriggerLfgPoolFillOnce()`),
+  kein separater Bot-Direktpfad.
+- **Kampf-KI**: alle 36 Legion-Spezialisierungen haben eine datengetriebene Rotationstabelle
+  (`g_BotSpecRotations`, `BotMgr::ProcessBotCombatAI()`) - Faehigkeiten-Namen/-Reihenfolgen sind Patch-7.3.5-
+  recherchiert, numerische Spell-IDs werden NIE hartkodiert, sondern zur Laufzeit gegen das auf diesem Server
+  geladene `Spell.db2` aufgeloest (siehe Kommentar bei `BotMgr::ResolveSpellIdByName()`).
+- **Quest-KI, Teil 1**: Annahme/Abgabe ueber direkte `Player`-Methodenaufrufe (`BotAcceptQuest()`/
+  `BotTurnInQuest()`), Toetungs-Kill-Credit laeuft automatisch ueber die normale Core-Logik mit.
+- **Teil-Loesung fuer "kein autonomer Zustandsautomat"**: ein Bot in einer Gruppe engagiert jetzt automatisch
+  dasselbe Kampfziel wie ein bereits kaempfendes Gruppenmitglied (`SelectBotCombatTarget()`).
+
 **Was (noch) nicht existiert:**
 
-- **Kein autonomer Zustandsautomat**: jede Aktion wird einzeln per GM-Befehl ausgeloest, kein selbststaendiger
-  Lebenszyklus.
-- **LFG-Pool-Matchmaking** (Bots stehen aktiv im Dungeon-Finder-Pool zur Verfuegung, Gruppe wird automatisch
-  passend zu Spieler-Level/Ilvl zusammengestellt) ist entworfen, aber noch nicht implementiert.
+- **Voll autonomer Zustandsautomat**: die obige Mit-Kampf-Automatik deckt nur das Ziel-Engagement ab - eigene
+  Entscheidungsfindung ("was tue ich als naechstes ohne GM-Befehl") fehlt noch weitgehend ausserhalb von Kampf
+  und LFG. Siehe Abschnitt e) fuer den geplanten naechsten Schritt (autonomer Dungeon-Clear-Modus).
 - **Artefaktwaffen fuer Bots** (Zuweisung + levelgerechtes Skillen) ist in Arbeit.
-- **Quest-KI** ist noch nicht begonnen (bewusst hinter Gruppe/LFR eingeordnet).
+- **Quest-KI, Teil 2** (autonome Quest-Auswahl + Mehr-Zonen-Navigation zum Questgeber/-ziel) ist noch nicht
+  begonnen.
 - Das Loot-System fuer Bots wurde **bewusst nicht gebaut** (Entscheidung): Bots erhalten ihre Ausruestung
   ausschliesslich ueber den Equipment-Pool, aktives Looten waere fuer reine Gruppen-/LFR-Fuellbots unnoetiger
-  Aufwand ohne Nutzen.
+  Aufwand ohne Nutzen. (Ausnahme: der neue Dungeon-Clear-Modus in Abschnitt e) loest nach jedem Kill automatisch
+  `BotLootTarget()` aus - das ist weiterhin kein "Spieler entscheidet, was er behaelt"-Loot-System, sondern reine
+  Bewegungsfreigabe fuer den naechsten Kampf.)
 
 **Vier unabhaengige, strukturelle Fehlerursachen gefunden und behoben** (nicht nur symptomatisch umschifft -
 interessant fuer andere TrinityCore-Entwickler, die Aehnliches versuchen):
@@ -227,6 +244,43 @@ interessant fuer andere TrinityCore-Entwickler, die Aehnliches versuchen):
    Spielerzustand - im selben spaeten Zeitfenster ebenfalls ein Zugriff auf einen bereits geschlossenen
    DB-Pool. Fix nach demselben Muster: dieser Online-Flag-Reset erfolgt jetzt ebenfalls vorher, waehrend der
    `LoginDatabase`-Pool noch garantiert lebt; der Destruktor bleibt fuer Bot-Sessions vollstaendig DB-frei.
+
+### e) Roadmap - naechste Bausteine (inspiriert von, aber NEU gebaut gegenueber 3.3.5-Community-Modulen)
+
+Drei Community-Module aus dem WotLK-3.3.5-Oekosystem (AzerothCore) dienen als **Ideen-/Zielreferenz** fuer die
+naechsten Playerbots-Ausbaustufen - **nicht** als Code-Quelle: alle drei stehen unter AGPL-3.0 (netzwerk-
+copyleft, staerker als unser GPL-2.0), ausserdem ist die AzerothCore-3.3.5-API (andere Core-Version, andere
+Klassen-/Spell-/Instanz-Datenlage) technisch inkompatibel mit diesem TrinityCore-Legion-7.3.5-Fork. Uebernommen
+wird ausschliesslich das **Feature-Konzept** (was soll das Modul koennen), die Implementierung ist in jedem Fall
+eine eigenstaendige Neuentwicklung gegen unsere eigenen Core-APIs:
+
+- **[mod-dungeon-clear](https://github.com/jrad7/mod-dungeon-clear)** (Referenz fuer: autonomer Dungeon-Clear-
+  Modus). Kernidee, die uebernommen wird: Routen werden **live aus dem Navmesh generiert, keine
+  handgepflegten Wegpunkte pro Dungeon** - das passt direkt zu unserer bereits bestaetigten
+  `MotionMaster::MovePoint(generatePath=true)`-Navmesh-Bewegung (Runde U/`MoveBotTestStepPath()`). Unsere
+  Variante navigiert autonom zum naechsten lebenden Boss-Rang-NPC auf der aktuellen Karte (ueber
+  `CreatureTemplate::rank`, keine Dungeon-spezifischen Daten noetig), engagiert Trash automatisch ueber die
+  bereits bestehende `SelectBotCombatTarget()`-Mit-Kampf-Logik und loest nach jedem Kill automatisch
+  `BotLootTarget()` aus. Bewusst NICHT uebernommen (zu grosser Umfang fuer eine erste Runde, braucht
+  Dungeon-spezifische Skript-Kenntnis, die wir fuer Legion-Instanzen nicht recherchiert haben): Boss-Mechanik-
+  Ausweichen, Pull-Stile (Leeroy/Advanced/Dynamic), Encounter-Skripte (Hebel/Altare/Eskorten), Heiler-
+  Positionierung, Tod-Wiederbelebungs-Choreographie.
+- **[mod-ah-bot-plus](https://github.com/NathanHandley/mod-ah-bot-plus)** (Referenz fuer: Auktionshaus-Bot).
+  Kernidee: ein konfigurierter, echter (nicht zwingend eingeloggter) Charakter tritt periodisch als
+  Verkaeufer/Kaeufer am Auktionshaus auf, Preisbildung rein config-getrieben (Kategorie/Qualitaet/Itemlevel-
+  Multiplikatoren, kein SQL-Tuning noetig). Unsere Variante implementiert das komplett neu gegen
+  `AuctionHouseMgr`/`AuctionPosting` dieses Cores.
+- **[mod-ollama-chat](https://github.com/DustinHendrickson/mod-ollama-chat)** (Referenz fuer: LLM-gestuetzter
+  Bot-Chat). Kernidee: Bot-Antworten auf Spieler-Chat werden ueber eine lokale Ollama-HTTP-API generiert statt
+  fest verdrahtet/zufaellig gewuerfelt. Die dabei verwendeten Drittbibliotheken cpp-httplib und nlohmann/json
+  sind selbst **MIT-lizenziert** (nicht Teil des AGPL-Moduls) - deren Verwendung (frisch vom jeweiligen
+  Upstream-Repo, nicht aus mod-ollama-chat kopiert) ist deshalb unproblematisch; die eigentliche Integrations-
+  Logik (Prompt-Aufbau, Chat-Hook, Konfiguration) wird komplett neu gegen unsere `WorldSession`/Chat-Handler-
+  Struktur geschrieben.
+
+Umsetzungsstand dieser drei Punkte: siehe Commit-Historie/PRs nach diesem README-Stand - wird hier bewusst nicht
+laufend nachgepflegt, um Drift zwischen Code und Dokumentation zu vermeiden; der PR-Text der jeweiligen
+Implementierungsrunde ist die verbindliche Quelle fuer den genauen Umfang/die Annahmen.
 
 ## Setup / Build
 
