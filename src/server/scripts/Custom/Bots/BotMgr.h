@@ -952,6 +952,36 @@ public:
     // einbinden muessen.
     int32 GetBotQuestStatus(uint32 accountId, uint32 questId) const;
 
+    // --- Autonomer Dungeon-Clear-Modus (Ideenreferenz mod-dungeon-clear, komplett neu gebaut - siehe
+    // README Abschnitt e) fuer die Lizenz-/Kompatibilitaets-Begruendung: AGPL-3.0 + andere Core-Version,
+    // deshalb keine Codezeile uebernommen, nur das Feature-Konzept) --------------------------------------
+    //
+    // Uebernommene Kernidee: Routen werden LIVE aus dem Navmesh generiert
+    // (`MotionMaster::MovePoint(generatePath=true)`, seit Runde U/`MoveBotTestStepPath()` bestaetigt
+    // funktionsfaehig) - KEINE handgepflegten Wegpunkte pro Dungeon. Ein Bot mit aktiviertem Modus
+    // navigiert autonom zum naechsten lebenden Dungeon-Boss (`Creature::IsDungeonBoss()` - dynamisch aus
+    // der `instance_encounters`-Tabelle gesetztes `flags_extra`-Bit, zuverlaessiger als
+    // `CreatureTemplate::rank`, das bei 5-Mann-Bossen haeufig nur `ELITE`/`RAREELITE` ist), engagiert
+    // dabei automatisch Trash in Aggro-Reichweite (dieselbe `Attack()+MoveChase()`-Logik wie
+    // `StartBotAttack()`) und loest nach jedem Kill automatisch `BotLootTarget()` fuer die naechste
+    // lootbare Leiche aus, bevor er weiterroutet.
+    //
+    // BEWUSST NICHT Teil dieser ersten Runde (siehe README-Roadmap fuer die vollstaendige Liste, jeweils
+    // mit Begruendung): Boss-Mechanik-Ausweichen, Pull-Stile (Leeroy/Advanced/Dynamic), Dungeon-
+    // Encounter-Skripte (Hebel/Altare/Eskorten/Wellen), Heiler-Positionierung waehrend des Kampfes,
+    // Tod-Wiederbelebungs-Choreographie bei Gruppenwipes. Jeder Bot routet ausserdem UNABHAENGIG - kein
+    // "ein Bot fuehrt, der Rest folgt"-Konzept wie im Referenzmodul; da die Routenwahl deterministisch
+    // ("naechster lebender Boss") ist, konvergieren mehrere gleichzeitig aktive Bots derselben Gruppe in
+    // der Praxis trotzdem auf denselben Pfad, aber das ist eine bewusste Vereinfachung, keine echte
+    // Formations-/Fuehrungslogik.
+    //
+    // Nur auf Dungeon-Karten aktivierbar (`Map::IsDungeon()`) - auf offenen Weltkarten gaebe es keine
+    // sinnvolle "naechster Boss"-Zielsuche (Weltbosse sind bewusst ausgeschlossen, siehe
+    // `Creature::IsDungeonBoss()`-Definition). Deaktiviert sich automatisch, sobald kein lebender
+    // Dungeon-Boss mehr auf der aktuellen Karte gefunden wird (Instanz vermutlich clear).
+    bool SetDungeonClearMode(uint32 accountId, bool enable);
+    bool IsDungeonClearModeActive(uint32 accountId) const;
+
     // --- Hooks, die bereits jetzt gefahrlos verdrahtet werden koennen ------
     //
     // Werden aus PlayerScript-Hooks (bot_scriptloader.cpp) fuer JEDEN
@@ -998,6 +1028,32 @@ private:
     // sonst nullptr (bewusst kein Fuellschaden/-heilung ohne Bedarf in dieser ersten Runde).
     Unit* SelectBotHealTarget(Player* bot) const;
 
+    // Dungeon-Clear-Modus (siehe SetDungeonClearMode()-Kommentar oben): wird pro Bot mit aktiviertem
+    // Modus alle ~1s aus Tick() aufgerufen (eigener Akkumulator DungeonClearTickAccumMs in
+    // BotSessionEntry). Tut nichts, waehrend der Bot bereits im Kampf ist (ProcessBotCombatAI()
+    // uebernimmt), sonst: lootbare Leiche in der Naehe? loten. Sonst: Trash in Aggro-Reichweite? mit
+    // engagieren. Sonst: naechster lebender Dungeon-Boss noch zu weit weg? per Navmesh dorthin routen.
+    // Kein lebender Boss mehr gefunden -> Modus automatisch beenden (Instanz vermutlich clear).
+    void ProcessDungeonClear(uint32 accountId, uint32 diff);
+
+    // Naechster lebender Dungeon-Boss auf der aktuellen Karte des Bots (Creature::IsDungeonBoss()), oder
+    // nullptr, falls keiner mehr lebt - lineare Suche ueber Map::GetCreatureBySpawnIdStore() (derselbe
+    // bereits mehrfach genutzte Container wie in StartBotAttack()/BotLootTarget(), hier aber ueber ALLE
+    // Werte statt eines einzelnen equal_range()-Schluessels iteriert, weil das Ziel nicht vorher bekannt
+    // ist) - unkritisch, da ein einzelner Dungeon typischerweise nur wenige hundert Kreaturen gleichzeitig
+    // geladen hat und diese Suche nur alle ~1s pro aktivem Bot laeuft.
+    Creature* FindNearestLivingDungeonBoss(Player* bot) const;
+
+    // Naechste angreifbare Nicht-Boss-Kreatur (Trash) innerhalb radius Yards - Unit::IsValidAttackTarget()
+    // uebernimmt Hostilitaets-/CC-/Sichtbarkeits-Pruefung (dieselbe Kern-API, die auch der reguraere
+    // Client-Zielwahl-Pfad nutzt), Dungeon-Bosse werden hier bewusst ausgeschlossen (die behandelt
+    // FindNearestLivingDungeonBoss() separat, damit ein Boss nicht "nebenbei" wie Trash gepullt wird).
+    Creature* FindNearestAggroableTrash(Player* bot, float radius) const;
+
+    // Naechste lootbare (bereits tote, UNIT_DYNFLAG_LOOTABLE) Leiche innerhalb radius Yards - genutzt, um
+    // nach einem Kill automatisch BotLootTarget() aufzurufen, bevor zum naechsten Ziel weitergeroutet wird.
+    Creature* FindNearestLootableCorpse(Player* bot, float radius) const;
+
     // Absichtlich leer in dieser Runde - kein Bot kann derzeit angelegt werden.
     std::unordered_map<ObjectGuid, std::unique_ptr<IBotCharacter>> _bots;
 
@@ -1031,6 +1087,11 @@ private:
         // Weltserver-Tick - Rotationsentscheidungen muessen nicht Millisekunden-praezise sein, und ein
         // seltenerer Tick reduziert die Spell.db2/GetSpellHistory()-Pruefungen bei vielen Bots).
         uint32 CombatAiTickAccumMs = 0;
+
+        // Autonomer Dungeon-Clear-Modus (siehe SetDungeonClearMode()) - eigener, groeberer Akkumulator
+        // (~1s statt ~400ms), da Routing-Entscheidungen weniger zeitkritisch sind als Rotationsschritte.
+        bool DungeonClearActive = false;
+        uint32 DungeonClearTickAccumMs = 0;
     };
     std::unordered_map<uint32, BotSessionEntry> _botSessions;
 

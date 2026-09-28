@@ -309,6 +309,10 @@ void BotMgr::Tick(uint32 diff)
             // ~400ms-Akkumulator, deshalb unbedenklich JEDEN Tick aufzurufen.
             ProcessBotCombatAI(accountId, diff);
 
+            // Autonomer Dungeon-Clear-Modus (siehe SetDungeonClearMode()-Kommentar): eigener ~1s-
+            // Akkumulator, tut fuer die meisten Bots nichts (DungeonClearActive default false).
+            ProcessDungeonClear(accountId, diff);
+
             // --- Runde R (27.09.2026): reiner Idle-Diagnose-Platzhalter --------
             // Bewusst KEINE Movement-/MotionMaster-Logik (explizit Runde S
             // vorbehalten, siehe BotCharacter.h "Runde R"-Kommentar). Tut nichts
@@ -3508,6 +3512,200 @@ int32 BotMgr::GetBotQuestStatus(uint32 accountId, uint32 questId) const
         return -1;
 
     return int32(player->GetQuestStatus(questId));
+}
+
+namespace
+{
+    // Autonomer Dungeon-Clear-Modus: siehe voller Design-Kommentar bei BotMgr::SetDungeonClearMode()
+    // (BotMgr.h) fuer die Begruendung (Ideenreferenz mod-dungeon-clear, komplett neu gebaut).
+    constexpr uint32 BOT_DUNGEON_CLEAR_TICK_MS = 1000;         // Routing-Entscheidung alle ~1s
+    constexpr float BOT_DUNGEON_CLEAR_TRASH_AGGRO_RADIUS = 15.0f;
+    constexpr float BOT_DUNGEON_CLEAR_LOOT_RADIUS = 10.0f;
+    constexpr float BOT_DUNGEON_CLEAR_ARRIVAL_DISTANCE = 5.0f; // "am Boss angekommen"-Toleranz
+}
+
+Creature* BotMgr::FindNearestLivingDungeonBoss(Player* bot) const
+{
+    Creature* best = nullptr;
+    float bestDist = 0.0f;
+
+    for (auto const& pair : bot->GetMap()->GetCreatureBySpawnIdStore())
+    {
+        Creature* creature = pair.second;
+        if (!creature || !creature->IsInWorld() || !creature->IsAlive() || !creature->IsDungeonBoss())
+            continue;
+
+        float dist = bot->GetDistance(creature);
+        if (!best || dist < bestDist)
+        {
+            best = creature;
+            bestDist = dist;
+        }
+    }
+
+    return best;
+}
+
+Creature* BotMgr::FindNearestAggroableTrash(Player* bot, float radius) const
+{
+    Creature* best = nullptr;
+    float bestDist = radius;
+
+    for (auto const& pair : bot->GetMap()->GetCreatureBySpawnIdStore())
+    {
+        Creature* creature = pair.second;
+        // Dungeon-Bosse werden bewusst ausgeschlossen - die behandelt FindNearestLivingDungeonBoss()
+        // separat, damit ein Boss nicht "nebenbei" wie gewoehnlicher Trash gepullt wird.
+        if (!creature || !creature->IsInWorld() || !creature->IsAlive() || creature->IsDungeonBoss())
+            continue;
+        if (!bot->IsValidAttackTarget(creature))
+            continue;
+
+        float dist = bot->GetDistance(creature);
+        if (dist <= bestDist)
+        {
+            best = creature;
+            bestDist = dist;
+        }
+    }
+
+    return best;
+}
+
+Creature* BotMgr::FindNearestLootableCorpse(Player* bot, float radius) const
+{
+    Creature* best = nullptr;
+    float bestDist = radius;
+
+    for (auto const& pair : bot->GetMap()->GetCreatureBySpawnIdStore())
+    {
+        Creature* creature = pair.second;
+        if (!creature || !creature->IsInWorld() || creature->IsAlive())
+            continue;
+        if (!creature->HasFlag(OBJECT_DYNAMIC_FLAGS, UNIT_DYNFLAG_LOOTABLE))
+            continue;
+
+        float dist = bot->GetDistance(creature);
+        if (dist <= bestDist)
+        {
+            best = creature;
+            bestDist = dist;
+        }
+    }
+
+    return best;
+}
+
+bool BotMgr::SetDungeonClearMode(uint32 accountId, bool enable)
+{
+    auto itr = _botSessions.find(accountId);
+    if (itr == _botSessions.end() || !itr->second.Session)
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::SetDungeonClearMode: keine Bot-Session fuer Account %u vorhanden.",
+            accountId);
+        return false;
+    }
+
+    Player* bot = itr->second.Session->GetPlayer();
+    if (!bot || !bot->IsInWorld())
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::SetDungeonClearMode: Account %u hat aktuell keinen Player in der "
+            "Welt (erst '.bottest login' ausfuehren).", accountId);
+        return false;
+    }
+
+    if (enable && !bot->GetMap()->IsDungeon())
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::SetDungeonClearMode: Account %u steht nicht auf einer Dungeon-Karte "
+            "(Map::IsDungeon()==false) - Modus wird nicht aktiviert (erst per '.bottest teleport' in eine "
+            "Instanz bringen).", accountId);
+        return false;
+    }
+
+    itr->second.DungeonClearActive = enable;
+    itr->second.DungeonClearTickAccumMs = 0;
+
+    TC_LOG_INFO("scripts.bots", "BotMgr::SetDungeonClearMode: Account %u - Dungeon-Clear-Modus %s.", accountId,
+        enable ? "AKTIVIERT" : "deaktiviert");
+    return true;
+}
+
+bool BotMgr::IsDungeonClearModeActive(uint32 accountId) const
+{
+    auto itr = _botSessions.find(accountId);
+    return itr != _botSessions.end() && itr->second.DungeonClearActive;
+}
+
+void BotMgr::ProcessDungeonClear(uint32 accountId, uint32 diff)
+{
+    auto itr = _botSessions.find(accountId);
+    if (itr == _botSessions.end() || !itr->second.Session || !itr->second.DungeonClearActive)
+        return;
+
+    itr->second.DungeonClearTickAccumMs += diff;
+    if (itr->second.DungeonClearTickAccumMs < BOT_DUNGEON_CLEAR_TICK_MS)
+        return;
+    itr->second.DungeonClearTickAccumMs = 0;
+
+    Player* bot = itr->second.Session->GetPlayer();
+    if (!bot || !bot->IsInWorld() || !bot->IsAlive())
+        return;
+
+    // Kampf laeuft bereits (gegen Boss ODER Trash) - ProcessBotCombatAI() bzw. der ganz normale
+    // Auto-Attack-Zyklus uebernehmen, Dungeon-Clear greift erst wieder ein, sobald der Bot nicht mehr
+    // kaempft.
+    if (bot->IsInCombat() || bot->IsNonMeleeSpellCast(false))
+        return;
+
+    if (Creature* corpse = FindNearestLootableCorpse(bot, BOT_DUNGEON_CLEAR_LOOT_RADIUS))
+    {
+        BotLootTarget(accountId, corpse->GetSpawnId());
+        return; // ein Schritt pro Tick - naechster Schritt (Trash/Boss-Suche) beim naechsten Tick
+    }
+
+    // Trash auf dem Weg hat Vorrang vor dem Weiterlaufen zum Boss - "auf dem Weg toeten", nicht dran
+    // vorbeilaufen und im Ruecken stehen lassen.
+    if (Creature* trash = FindNearestAggroableTrash(bot, BOT_DUNGEON_CLEAR_TRASH_AGGRO_RADIUS))
+    {
+        bot->Attack(trash, true);
+        bot->GetMotionMaster()->MoveChase(trash);
+        TC_LOG_INFO("scripts.bots", "BotMgr::ProcessDungeonClear: Account %u engagiert Trash '%s' auf dem Weg "
+            "zum Boss.", accountId, trash->GetName().c_str());
+        return;
+    }
+
+    Creature* boss = FindNearestLivingDungeonBoss(bot);
+    if (!boss)
+    {
+        TC_LOG_INFO("scripts.bots", "BotMgr::ProcessDungeonClear: Account %u - kein lebender Dungeon-Boss mehr "
+            "auf dieser Karte gefunden (Instanz vermutlich clear) - Dungeon-Clear-Modus wird automatisch "
+            "beendet.", accountId);
+        itr->second.DungeonClearActive = false;
+        return;
+    }
+
+    if (bot->GetDistance(boss) <= BOT_DUNGEON_CLEAR_ARRIVAL_DISTANCE)
+    {
+        // Am Boss angekommen, aber (noch) nicht im Kampf (z.B. weil der Encounter erst durch aktives
+        // Angreifen ausgeloest wird) - aktiv angreifen statt daneben stehen zu bleiben.
+        bot->Attack(boss, true);
+        bot->GetMotionMaster()->MoveChase(boss);
+        TC_LOG_INFO("scripts.bots", "BotMgr::ProcessDungeonClear: Account %u am Boss '%s' angekommen, engagiert.",
+            accountId, boss->GetName().c_str());
+        return;
+    }
+
+    // Navmesh-Routing zum naechsten Boss - KEINE Wegpunkte, dieselbe bereits bestaetigte
+    // generatePath=true-Logik wie MoveBotTestStepPath()/Runde U. Nur neu ansetzen, wenn der Bot gerade
+    // NICHT schon unterwegs ist (movespline->Finalized()) - verhindert, dass ein laufender Pfad jede
+    // Sekunde neu berechnet/unterbrochen wird (dieselbe Konvention wie der Patrol-Fortschritt in Tick()).
+    if (bot->movespline->Finalized())
+    {
+        bot->GetMotionMaster()->MovePoint(0, boss->GetPositionX(), boss->GetPositionY(), boss->GetPositionZ(),
+            /*generatePath*/ true);
+        TC_LOG_INFO("scripts.bots", "BotMgr::ProcessDungeonClear: Account %u routet per Navmesh zu Boss '%s' "
+            "(Distanz %.1f).", accountId, boss->GetName().c_str(), bot->GetDistance(boss));
+    }
 }
 
 bool BotMgr::CreateBot(uint32 /*ownerAccountId*/, std::string const& botCharacterName)

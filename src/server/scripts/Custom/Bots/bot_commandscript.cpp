@@ -73,6 +73,7 @@ public:
             { "questaccept",   rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestQuestAccept,   "" },
             { "questturnin",   rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestQuestTurnIn,   "" },
             { "queststatus",   rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestQuestStatus,   "" },
+            { "dungeonclear",  rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestDungeonClear,  "" },
             { "status",        rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestStatus,        "" },
         };
         static std::vector<ChatCommand> commandTable =
@@ -949,6 +950,39 @@ public:
         return true;
     }
 
+    // .bottest dungeonclear <accountId> <on|off>
+    // Autonomer Dungeon-Clear-Modus (siehe BotMgr::SetDungeonClearMode() fuer den vollen Code-Review,
+    // Ideenreferenz mod-dungeon-clear/README Abschnitt e)). Nur auf einer Dungeon-Karte aktivierbar - Bot
+    // vorher per '.bottest teleport' in eine Instanz bringen. Deaktiviert sich automatisch, sobald kein
+    // lebender Dungeon-Boss mehr auf der Karte gefunden wird.
+    static bool HandleBotTestDungeonClear(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest dungeonclear <accountId> <on|off>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        uint32 accountId = 0;
+        std::string onOff;
+        iss >> accountId >> onOff;
+
+        if (accountId == 0 || (onOff != "on" && onOff != "off"))
+        {
+            handler->SendSysMessage("Syntax: .bottest dungeonclear <accountId> <on|off>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->SetDungeonClearMode(accountId, onOff == "on");
+        handler->PSendSysMessage("[bottest] dungeonclear(account %u, %s): %s - Server.log (scripts.bots) auf "
+            "'BotMgr::ProcessDungeonClear'/'BotMgr::SetDungeonClearMode' Diagnose-Zeilen pruefen.",
+            accountId, onOff.c_str(), ok ? "OK" : "FEHLER (siehe Server.log)");
+        return true;
+    }
+
     // .bottest status <accountId>
     static bool HandleBotTestStatus(ChatHandler* handler, char const* args)
     {
@@ -1011,6 +1045,9 @@ public:
             }
             handler->PSendSysMessage("[bottest] status(account %u): Kampf-KI-Rolle=%s, "
                 "PrimarySpecialization=%u.", accountId, roleStr, player->GetPrimarySpecialization());
+
+            if (sBotMgr->IsDungeonClearModeActive(accountId))
+                handler->PSendSysMessage("[bottest] status(account %u): Dungeon-Clear-Modus AKTIV.", accountId);
         }
         else
             handler->PSendSysMessage("[bottest] status(account %u): %s - kein Player-Objekt vorhanden.", accountId, stateStr);
