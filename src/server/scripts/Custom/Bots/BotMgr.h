@@ -196,10 +196,76 @@
 #include <unordered_set>
 #include <memory>
 #include <string>
+#include <vector>
 
 class IBotCharacter;
 class Player;
+class Unit;
 class WorldSession;
+struct SpellInfo;
+
+// --- Kampf-KI (Kampfmechaniken/Rotationen aller Klassen/Skillungen, siehe voller Design-Kommentar
+// bei BotMgr::ProcessBotCombatAI() unten) --------------------------------------------------------
+//
+// Grundproblem, das dieses Design loest: Faehigkeiten-Namen/-Reihenfolgen sind aus Community-
+// Recherche fuer Patch 7.3.5 belegbar, aber NUMERISCHE Spell-IDs sind es nicht zuverlaessig (siehe
+// BotMgr::ResolveSpellIdByName()-Kommentar) - Faehigkeiten wurden zwischen Erweiterungen und sogar
+// innerhalb von Legion mehrfach umgestaltet/umnummeriert. Deshalb sind Rotationen hier ausschliesslich
+// ueber den ENGLISCHEN Faehigkeitsnamen (aus Recherche, siehe BotMgr.cpp-Kommentar bei
+// g_BotSpecRotations) definiert und werden erst zur Laufzeit gegen das tatsaechlich auf DIESEM Server
+// geladene Spell.db2 (Build 26972) aufgeloest - garantiert korrekt fuer genau diese Version, keine
+// geratene ID.
+
+enum class BotRole : uint8
+{
+    Unknown,
+    Tank,
+    Healer,
+    MeleeDps,
+    RangedDps
+};
+
+enum class BotRotationCondition : uint8
+{
+    Always,                  // sofort einsetzen, sobald bereit (typischer Fuellschlag/On-CD-Skill)
+    TargetHealthPctBelow,    // Ziel (Gegner ODER gewaehltes Heilziel, je nach Rolle) unter X% Leben
+    SelfHealthPctBelow,      // eigenes Leben unter X% (Defensiv-CDs/Selbstheilung)
+    ResourceAtLeast,         // eigene Ressource (ConditionAuxPower) >= X
+    AuraMissingOnSelf,       // Buff (ConditionAuxSpellName) NICHT aktiv auf dem Bot selbst
+    AuraPresentOnSelf,       // Buff/Proc (ConditionAuxSpellName) IST aktiv auf dem Bot selbst
+    AuraMissingOnTarget      // Aura (ConditionAuxSpellName, z.B. DoT/HoT) NICHT aktiv auf dem Ziel
+};
+
+// Ein einzelner Prioritaetseintrag. SpellName ist die recherchierte, patch-7.3.5-genaue Bezeichnung -
+// die einzige "Wahrheitsquelle" in diesem Modul; ResolvedSpellId/ResolvedAuxSpellId werden EINMALIG
+// pro Prozesslauf von BotMgr::GetOrResolveSpecRotation() befuellt (siehe dort) und sind bewusst
+// `mutable`, weil g_BotSpecRotations (BotMgr.cpp) eine statische, unveraenderliche Datentabelle ist,
+// die dennoch verzoegert (lazy) einmalig angereichert werden muss.
+struct BotRotationStep
+{
+    char const* SpellName;
+    BotRotationCondition Condition = BotRotationCondition::Always;
+    float ConditionValue = 0.0f;
+    uint32 ConditionAuxPower = 0;                  // nur fuer ResourceAtLeast (Powers-Enum-Wert)
+    char const* ConditionAuxSpellName = nullptr;    // nur fuer die drei Aura*-Bedingungen
+    mutable uint32 ResolvedSpellId = 0;
+    mutable uint32 ResolvedAuxSpellId = 0;
+};
+
+// Eine vollstaendige Rotationstabelle fuer EINE Spezialisierung (ChrSpecialization-Id, dieselbe
+// Nummerierung wie bereits in BotMgr::GetArtifactItemForSpec()/GetDefaultSpecForClass() verwendet -
+// siehe dort, Runde 143). Bewusst als flache, von oben nach unten ausgewertete Prioritaetsliste
+// (kein Verhaltensbaum) - der erste Schritt, dessen Bedingung UND Ressourcen/Cooldown/Reichweite
+// passen, wird gecastet, danach kehrt ProcessBotCombatAI() fuer diesen Tick zurueck (max. 1 Zauber
+// pro Tick, da alle Schritte dieselbe GCD-Ressource teilen - siehe dortiger Kommentar).
+struct BotSpecRotation
+{
+    uint32 SpecId = 0;
+    uint32 SpellFamily = 0;          // SpellFamilyNames-Enum-Wert, filtert Namenskollisionen zwischen Klassen
+    BotRole Role = BotRole::Unknown;
+    std::vector<BotRotationStep> Priority;
+    mutable bool ResolvedOnce = false;
+};
 
 class TC_GAME_API BotMgr
 {
@@ -798,6 +864,74 @@ public:
     // ~500 - unkritisch fuer einen alle paar Sekunden laufenden Tick, siehe LFG_POOL_FILL_INTERVAL_MS).
     bool IsBotPlayerGuid(ObjectGuid guid) const;
 
+    // --- Kampf-KI (Kampfmechaniken fuer alle Klassen/Skillungen) - erste Runde ------------------------
+    //
+    // Ziel laut Auftrag: Faehigkeiten-Nutzung/Rotationen fuer DPS/Heiler/Tank, aber NUR mit Daten, die
+    // fuer genau Patch 7.3.5 (Build 26972) recherchiert und belegt sind - siehe ausfuehrlichen
+    // Design-Kommentar oben bei BotRotationStep/BotSpecRotation sowie bei ResolveSpellIdByName() und
+    // g_BotSpecRotations (BotMgr.cpp) fuer die Quellenlage.
+    //
+    // Umfang dieser ersten Runde (bewusst nicht alle 36 Skillungen auf einmal, siehe PR-Bericht fuer
+    // die volle Roadmap-Tabelle): VIER Pilot-Skillungen, je eine pro Rollen-Archetyp, mit der
+    // hoechsten Recherche-Konfidenz aus der Rechercherunde -
+    //   - Tank: Protection Warrior (specId 73)
+    //   - Nahkampf-DPS: Fury Warrior (specId 72)
+    //   - Fernkampf/Zauber-DPS: Frost Mage (specId 64)
+    //   - Heiler: Restoration Shaman (specId 264)
+    // Jede andere Skillung hat schlicht KEINEN Eintrag in g_BotSpecRotations - GetOrResolveSpecRotation()
+    // liefert dann nullptr, ProcessBotCombatAI() tut in diesem Fall NICHTS zusaetzlich (der Bot bleibt
+    // beim bereits bestehenden reinen Nahkampf-Auto-Attack-Verhalten aus StartBotAttack(), falls per
+    // GM-Befehl ausgeloest) - kein Absturz, kein falsches Verhalten, einfach "noch nicht implementiert".
+    //
+    // Wird pro eingeloggtem Bot alle ~400ms aus Tick() aufgerufen (eigener Akkumulator
+    // CombatAiTickAccumMs in BotSessionEntry, analog IdleTickAccumMs/PatrolCyclesRemaining). Schliesst
+    // nebenbei einen Teil der im README dokumentierten Luecke "kein autonomer Zustandsautomat": ein
+    // Bot in einer Gruppe engagiert automatisch dasselbe Ziel wie ein bereits kaempfendes
+    // Gruppenmitglied (siehe SelectBotCombatTarget()), ohne dass '.bottest attack' manuell fuer jeden
+    // einzelnen Kampf noetig waere - '.bottest attack' bleibt fuer gezielte Einzeltests weiterhin
+    // nutzbar und unveraendert.
+    void ProcessBotCombatAI(uint32 accountId, uint32 diff);
+
+    // Fuer '.bottest status'/Diagnose: aktuell erkannte Rolle des Bots (Unknown, falls die
+    // Primaerspezialisierung noch keinen Eintrag in g_BotSpecRotations hat).
+    BotRole GetBotRole(uint32 accountId) const;
+
+    // --- Quest-KI, Teil 1 (Annahme/Fortschritt/Abgabe) -------------------------------------------
+    //
+    // Umfang dieser ersten Runde (README-Luecke "Quest-KI noch nicht begonnen" teilweise geschlossen):
+    // die serverseitige Annahme-/Abgabe-Mechanik, DIREKT ueber dieselben oeffentlichen Player-Methoden
+    // aufgerufen, die auch WorldSession::HandleQuestgiverAcceptQuestOpcode()/
+    // HandleQuestgiverChooseRewardOpcode() (QuestHandler.cpp) intern nutzen - passend zum bereits
+    // etablierten Direktaufruf-Muster dieses Moduls (kein Opcode-/Packet-Nachbau noetig, anders als
+    // z.B. bei BotLootTarget() in Runde 129, weil Player::AddQuestAndCheckCompletion()/RewardQuest()
+    // bereits die vollstaendige serverseitige Arbeit sind, die der Opcode-Handler selbst aufruft).
+    //
+    // BEWUSST NICHT Teil dieser Runde (naechste Ausbaustufe): eigenstaendige Entscheidung, WELCHE
+    // Quest angenommen wird, und autonome Navigation zum Questgeber/Questziel (Wegfindung ueber
+    // mehrere Zonen) - das ist der groessere, im README separat als "kein autonomer Zustandsautomat"
+    // dokumentierte Punkt. Toetungsfortschritt fuer Kill-Quest-Ziele braucht dagegen KEINEN
+    // zusaetzlichen Code: der Core vergibt Quest-Kill-Credit ueber die normale, rollenunabhaengige
+    // KillRewarder-Logik an JEDEN an einem Kill beteiligten Player - sobald ein Bot per
+    // StartBotAttack()/ProcessBotCombatAI() aktiv am Kill mitwirkt, laeuft Kill-Credit automatisch mit,
+    // exakt wie bei einem echten Spieler.
+    //
+    // questGiverSpawnGuid ist wie bei StartBotAttack()/BotLootTarget() die DB-Spawn-Id aus der
+    // `creature`-Tabelle (Spalte "guid"), NICHT die Laufzeit-ObjectGuid - dieselbe
+    // Map::GetCreatureBySpawnIdStore()-Aufloesung wird wiederverwendet.
+    bool BotAcceptQuest(uint32 accountId, ObjectGuid::LowType questGiverSpawnGuid, uint32 questId);
+
+    // Gegenstueck: Abgabe/Belohnung. rewardItemChoiceId ist der ECHTE Item-Entry der gewaehlten
+    // Belohnung (nicht ein Belohnungs-Slot-Index) - siehe WorldPackets::Quest::QuestGiverChooseReward.
+    // 0 ist gueltig fuer Quests ohne Auswahl-Belohnung.
+    bool BotTurnInQuest(uint32 accountId, ObjectGuid::LowType questGiverSpawnGuid, uint32 questId,
+        uint32 rewardItemChoiceId);
+
+    // Fuer '.bottest queststatus'/Diagnose und fuer eine spaetere autonome Schleife ("ist dieses
+    // Questziel schon fertig?"): liefert den rohen QuestStatus-Enum-Wert als int32 (QUEST_STATUS_NONE/
+    // INCOMPLETE/COMPLETE/FAILED/...), ohne dass Aufrufer aus bot_commandscript.cpp QuestDef.h
+    // einbinden muessen.
+    int32 GetBotQuestStatus(uint32 accountId, uint32 questId) const;
+
     // --- Hooks, die bereits jetzt gefahrlos verdrahtet werden koennen ------
     //
     // Werden aus PlayerScript-Hooks (bot_scriptloader.cpp) fuer JEDEN
@@ -814,6 +948,35 @@ private:
     // Runde 135: liest/erstellt die dauerhaft fixe Pool-Qualitaetsstufe eines Bots
     // (characters.bot_gear_tier) - siehe .cpp fuer Details.
     uint8 GetOrAssignBotGearTier(Player* player);
+
+    // Kampf-KI (siehe ProcessBotCombatAI()-Kommentar oben): loest einen recherchierten englischen
+    // Faehigkeitsnamen (Patch 7.3.5) zur Laufzeit gegen das tatsaechlich geladene Spell.db2 dieses
+    // Servers auf - siehe voller Begruendung in der .cpp. Exaktes, case-insensitives Namens-Match,
+    // gefiltert auf spellFamily (SpellFamilyNames-Enum), damit gleichnamige Faehigkeiten anderer
+    // Klassen keine Kollision verursachen. Rein lesend, Ergebnis wird prozessweit gecacht.
+    uint32 ResolveSpellIdByName(std::string const& englishName, uint32 spellFamily) const;
+
+    // Liefert die (statische) Rotationstabelle fuer eine ChrSpecialization-Id, oder nullptr, falls
+    // diese Spec noch keinen Eintrag in g_BotSpecRotations hat (siehe BotMgr.cpp). Loest beim ERSTEN
+    // Aufruf fuer eine gegebene Tabelle alle SpellName/ConditionAuxSpellName-Eintraege einmalig per
+    // ResolveSpellIdByName() auf (BotSpecRotation::ResolvedOnce-Flag) - kein wiederholtes Scannen des
+    // gesamten Spell.db2 pro Kampf-Tick.
+    BotSpecRotation const* GetOrResolveSpecRotation(uint32 specId) const;
+
+    // Wertet eine einzelne BotRotationStep-Bedingung gegen den aktuellen Bot-/Zielzustand aus - siehe
+    // BotRotationCondition-Kommentar in BotMgr.h fuer die Bedeutung jedes Falls.
+    bool EvaluateBotRotationCondition(Player* player, Unit* target, BotRotationStep const& step) const;
+
+    // Zielauswahl fuer DPS/Tank-Rollen: eigenes aktuelles Kampfziel, sonst (falls in einer Gruppe) das
+    // Ziel eines bereits kaempfenden Gruppenmitglieds - engagiert den Bot in letzterem Fall automatisch
+    // mit (Attack()+MoveChase(), dieselbe Logik wie StartBotAttack()) statt nur zuzusehen. Liefert
+    // nullptr, wenn aktuell niemand in der Gruppe kaempft.
+    Unit* SelectBotCombatTarget(Player* bot) const;
+
+    // Zielauswahl fuer Heiler-Rollen: das Gruppenmitglied (inkl. des Bots selbst) mit dem niedrigsten
+    // Lebensprozentsatz, aber NUR wenn dieser unter BOT_HEAL_CONSIDER_THRESHOLD_PCT liegt - liefert
+    // sonst nullptr (bewusst kein Fuellschaden/-heilung ohne Bedarf in dieser ersten Runde).
+    Unit* SelectBotHealTarget(Player* bot) const;
 
     // Absichtlich leer in dieser Runde - kein Bot kann derzeit angelegt werden.
     std::unordered_map<ObjectGuid, std::unique_ptr<IBotCharacter>> _bots;
@@ -843,6 +1006,11 @@ private:
         uint32 PatrolCyclesRemaining = 0;
         float PatrolAX = 0.0f, PatrolAY = 0.0f, PatrolAZ = 0.0f;
         float PatrolBX = 0.0f, PatrolBY = 0.0f, PatrolBZ = 0.0f;
+
+        // Kampf-KI: eigener Tick-Akkumulator fuer ProcessBotCombatAI() (alle ~400ms statt jeden
+        // Weltserver-Tick - Rotationsentscheidungen muessen nicht Millisekunden-praezise sein, und ein
+        // seltenerer Tick reduziert die Spell.db2/GetSpellHistory()-Pruefungen bei vielen Bots).
+        uint32 CombatAiTickAccumMs = 0;
     };
     std::unordered_map<uint32, BotSessionEntry> _botSessions;
 

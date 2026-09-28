@@ -70,6 +70,9 @@ public:
             { "equipartifact", rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestEquipArtifact, "" },
             { "skillartifact", rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestSkillArtifact, "" },
             { "lfgfill",       rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestLfgFill,       "" },
+            { "questaccept",   rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestQuestAccept,   "" },
+            { "questturnin",   rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestQuestTurnIn,   "" },
+            { "queststatus",   rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestQuestStatus,   "" },
             { "status",        rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestStatus,        "" },
         };
         static std::vector<ChatCommand> commandTable =
@@ -850,6 +853,102 @@ public:
         return true;
     }
 
+    // .bottest questaccept <accountId> <questGiverSpawnGuid> <questId>
+    // Quest-KI, Teil 1 (siehe BotMgr::BotAcceptQuest() fuer den vollen Code-Review): questGiverSpawnGuid
+    // ist die DB-Spawn-Id aus der `creature`-Tabelle (Spalte "guid"), dieselbe Konvention wie
+    // '.bottest attack'/'.bottest loot'. Der Bot muss dafuer bereits in Interaktionsreichweite des
+    // Questgebers stehen (z.B. per '.bottest teleport' dorthin gebracht).
+    static bool HandleBotTestQuestAccept(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest questaccept <accountId> <questGiverSpawnGuid> <questId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        uint32 accountId = 0, questId = 0;
+        uint64 questGiverSpawnGuid = 0;
+        iss >> accountId >> questGiverSpawnGuid >> questId;
+
+        if (accountId == 0 || questGiverSpawnGuid == 0 || questId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest questaccept <accountId> <questGiverSpawnGuid> <questId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->BotAcceptQuest(accountId, ObjectGuid::LowType(questGiverSpawnGuid), questId);
+        handler->PSendSysMessage("[bottest] questaccept(account %u, questGiverSpawnGuid %llu, quest %u): %s - "
+            "'.bottest queststatus %u %u' pruefen.", accountId, (unsigned long long)questGiverSpawnGuid, questId,
+            ok ? "OK (angenommen)" : "FEHLER (siehe Server.log)", accountId, questId);
+        return true;
+    }
+
+    // .bottest questturnin <accountId> <questGiverSpawnGuid> <questId> [rewardItemChoiceId]
+    // Gegenstueck zu '.bottest questaccept' - siehe BotMgr::BotTurnInQuest(). Quest muss vorher bereits
+    // QUEST_STATUS_COMPLETE sein (Zielfortschritt, z.B. Toetungs-Kill-Credit, laeuft automatisch ueber
+    // die normale Core-KillRewarder-Logik mit, sobald der Bot aktiv an einem Kill beteiligt war - siehe
+    // BotMgr.h-Kopfkommentar). rewardItemChoiceId optional/0 fuer Quests ohne Auswahl-Belohnung.
+    static bool HandleBotTestQuestTurnIn(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest questturnin <accountId> <questGiverSpawnGuid> <questId> [rewardItemChoiceId]");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        uint32 accountId = 0, questId = 0, rewardItemChoiceId = 0;
+        uint64 questGiverSpawnGuid = 0;
+        iss >> accountId >> questGiverSpawnGuid >> questId;
+        if (iss >> rewardItemChoiceId) { }
+
+        if (accountId == 0 || questGiverSpawnGuid == 0 || questId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest questturnin <accountId> <questGiverSpawnGuid> <questId> [rewardItemChoiceId]");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->BotTurnInQuest(accountId, ObjectGuid::LowType(questGiverSpawnGuid), questId, rewardItemChoiceId);
+        handler->PSendSysMessage("[bottest] questturnin(account %u, questGiverSpawnGuid %llu, quest %u, "
+            "rewardItemChoiceId %u): %s.", accountId, (unsigned long long)questGiverSpawnGuid, questId,
+            rewardItemChoiceId, ok ? "OK (abgegeben)" : "FEHLER (siehe Server.log)");
+        return true;
+    }
+
+    // .bottest queststatus <accountId> <questId>
+    static bool HandleBotTestQuestStatus(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest queststatus <accountId> <questId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        uint32 accountId = 0, questId = 0;
+        iss >> accountId >> questId;
+
+        if (accountId == 0 || questId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest queststatus <accountId> <questId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        int32 status = sBotMgr->GetBotQuestStatus(accountId, questId);
+        handler->PSendSysMessage("[bottest] queststatus(account %u, quest %u): roh=%d "
+            "(-1=kein Player, 0=NONE, 1=COMPLETE, 3=INCOMPLETE, 5=FAILED, 6=REWARDED - siehe QuestDef.h "
+            "enum QuestStatus fuer die vollstaendige, nicht durchgehende Nummerierung).",
+            accountId, questId, status);
+        return true;
+    }
+
     // .bottest status <accountId>
     static bool HandleBotTestStatus(ChatHandler* handler, char const* args)
     {
@@ -898,6 +997,20 @@ public:
             lfg::LfgState lfgState = sLFGMgr->GetState(player->GetGUID());
             handler->PSendSysMessage("[bottest] status(account %u): LFG-Zustand=%s (roh=%u).", accountId,
                 lfg::GetStateString(lfgState).c_str(), uint32(lfgState));
+
+            // Kampf-KI: erkannte Rolle anzeigen (Unknown = Skillung noch nicht in g_BotSpecRotations
+            // verdrahtet, siehe BotMgr.cpp-Kommentar) - hilft beim Live-Test ohne Server.log-Blick.
+            char const* roleStr = "Unknown (Skillung noch nicht verdrahtet)";
+            switch (sBotMgr->GetBotRole(accountId))
+            {
+                case BotRole::Tank:      roleStr = "Tank"; break;
+                case BotRole::Healer:    roleStr = "Healer"; break;
+                case BotRole::MeleeDps:  roleStr = "MeleeDps"; break;
+                case BotRole::RangedDps: roleStr = "RangedDps"; break;
+                default: break;
+            }
+            handler->PSendSysMessage("[bottest] status(account %u): Kampf-KI-Rolle=%s, "
+                "PrimarySpecialization=%u.", accountId, roleStr, player->GetPrimarySpecialization());
         }
         else
             handler->PSendSysMessage("[bottest] status(account %u): %s - kein Player-Objekt vorhanden.", accountId, stateStr);

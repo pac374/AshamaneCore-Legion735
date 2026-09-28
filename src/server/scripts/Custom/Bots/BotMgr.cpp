@@ -43,6 +43,11 @@
 #include "DB2Structure.h"
 #include "ItemDefines.h"
 #include "LFGMgr.h"
+#include "SpellMgr.h"
+#include "SpellInfo.h"
+#include "SpellHistory.h"
+#include "Util.h"
+#include "QuestDef.h"
 #include <cmath>
 #include <sstream>
 #include <vector>
@@ -299,6 +304,10 @@ void BotMgr::Tick(uint32 diff)
         if (entry.Session->GetPlayer())
         {
             entry.State = BotCharacterState::STATE_IN_WORLD;
+
+            // Kampf-KI (siehe BotMgr.h-Kopfkommentar "Kampf-KI"/ProcessBotCombatAI()): eigener
+            // ~400ms-Akkumulator, deshalb unbedenklich JEDEN Tick aufzurufen.
+            ProcessBotCombatAI(accountId, diff);
 
             // --- Runde R (27.09.2026): reiner Idle-Diagnose-Platzhalter --------
             // Bewusst KEINE Movement-/MotionMaster-Logik (explizit Runde S
@@ -2522,6 +2531,520 @@ void BotMgr::ProcessLfgPoolFillTick(uint32 diff)
 
     _lfgFillTickAccumMs = 0;
     TriggerLfgPoolFillOnce();
+}
+
+namespace
+{
+    // Kampf-KI: alle ~400ms statt jeden Weltserver-Tick (siehe BotSessionEntry::CombatAiTickAccumMs).
+    constexpr uint32 BOT_COMBAT_AI_TICK_MS = 400;
+    // Nahkampf-Engagement-Distanz fuer die automatische Mit-Kampf-Logik in SelectBotCombatTarget()
+    // (Tank/Nahkampf-DPS folgen/engagieren erst innerhalb dieser Distanz automatisch mit).
+    constexpr float BOT_MELEE_ENGAGE_RANGE = 30.0f;
+    // Heiler-Rolle betrachtet ein Gruppenmitglied erst ab dieser Lebens-Schwelle ueberhaupt als
+    // "braucht etwas" - verhindert sinnloses Dauerheilen bei vollem Leben.
+    constexpr float BOT_HEAL_CONSIDER_THRESHOLD_PCT = 90.0f;
+
+    // --- Kampf-KI: Pilot-Rotationstabellen, Patch 7.3.5 (Build 26972) -----------------------------
+    //
+    // QUELLENLAGE (siehe voller PR-Bericht fuer die vollstaendige Aufschluesselung je Skillung):
+    // Faehigkeiten-Namen, -Reihenfolge und -Bedingungen stammen aus einer gezielten Web-Recherche
+    // dieser Runde (Icy-Veins-/Wowhead-/guiaswow.com-abgeleitete 7.2/7.3.5-Guides, mehrfach
+    // gegengeprueft), AUSSCHLIESSLICH auf Patch 7.3.5 eingegrenzt (explizit NICHT BfA/Shadowlands/
+    // aktuelles Retail, da sich Faehigkeiten seither mehrfach grundlegend geaendert haben). Die
+    // Recherche selbst nennt fuer jede der vier hier gewaehlten Skillungen "hoch"/"mittel-hoch"
+    // Konfidenz auf Namen/Reihenfolge. NUMERISCHE Spell-IDs waren dagegen in KEINER Quelle dieser
+    // Runde zuverlaessig zu bestaetigen (Netzwerkzugriff auf Wowhead/Icy-Veins/web.archive.org war in
+    // der Recherche-Sandbox blockiert) - deshalb enthaelt diese Tabelle bewusst KEINE IDs, sondern nur
+    // die recherchierten Namen; ResolveSpellIdByName() (siehe dort) loest sie beim ersten Gebrauch
+    // gegen das tatsaechlich auf DIESEM Server geladene Spell.db2 auf. Das ist die einzige Quelle, die
+    // fuer GENAU diesen Build (26972) garantiert korrekt ist - kein Raten, kein Uebernehmen einer
+    // moeglicherweise falschen/veralteten ID aus einer anderen Patch-Version.
+    //
+    // Nur VIER Skillungen (je eine pro Rollen-Archetyp) in dieser ersten Runde - siehe
+    // BotMgr.h-Kopfkommentar bei ProcessBotCombatAI() fuer die Begruendung und den PR-Bericht fuer die
+    // Roadmap-Tabelle der restlichen 32 Skillungen (Framework ist fertig, es fehlen nur weitere
+    // Eintraege in dieser Tabelle - kein weiterer Code-Umbau noetig).
+    std::vector<BotSpecRotation> g_BotSpecRotations =
+    {
+        // --- Protection Warrior (specId 73) - Tank ---------------------------------------------
+        // Quelle: "Shield Block > Ignore Pain, Rest ist Rage-Generierung" - als Kernphilosophie mit
+        // HOHER Konfidenz recherchiert und laut Recherche ueber praktisch ganz Legion stabil (siehe
+        // PR-Bericht). Revenge/Shield Slam/Devastate-Reihenfolge darunter mit MITTLERER Konfidenz.
+        {
+            73, SPELLFAMILY_WARRIOR, BotRole::Tank,
+            {
+                { "Shield Block",  BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Shield Block" },
+                { "Ignore Pain",   BotRotationCondition::ResourceAtLeast,   60.0f, POWER_RAGE },
+                { "Revenge",       BotRotationCondition::Always },
+                { "Shield Slam",   BotRotationCondition::Always },
+                { "Devastate",     BotRotationCondition::Always }
+            }
+        },
+        // --- Fury Warrior (specId 72) - Nahkampf-DPS -------------------------------------------
+        // Quelle: Bloodthirst/Raging Blow/Rampage-Kernschleife mit MITTEL-HOHER Konfidenz recherchiert
+        // (Rampage-vs-Raging-Blow-Feinreihenfolge laut Recherche talentabhaengig/schwaecher belegt,
+        // hier bewusst konservativ: Rampage erst ab hohem Rage-Wert, nicht bei jeder Gelegenheit).
+        {
+            72, SPELLFAMILY_WARRIOR, BotRole::MeleeDps,
+            {
+                { "Bloodthirst",   BotRotationCondition::Always },
+                { "Raging Blow",   BotRotationCondition::Always },
+                { "Rampage",       BotRotationCondition::ResourceAtLeast,     80.0f, POWER_RAGE },
+                { "Execute",       BotRotationCondition::TargetHealthPctBelow, 20.0f },
+                { "Whirlwind",     BotRotationCondition::Always }
+            }
+        },
+        // --- Frost Mage (specId 64) - Fernkampf/Zauber-DPS -------------------------------------
+        // Quelle: Brain-Freeze->Flurry->Ice-Lance-"Shatter" und Fingers-of-Frost-Verbrauch mit HOHER
+        // Konfidenz recherchiert (mehrfach als stabile 7.3.5-Kernschleife bestaetigt). Frozen Orb/
+        // Ebonbolt auf Cooldown, Frostbolt als ressourcenloser Fuellschlag am Ende der Liste (immer
+        // bereit, feuert also automatisch, wenn nichts anderes bereit/zutreffend ist).
+        {
+            64, SPELLFAMILY_MAGE, BotRole::RangedDps,
+            {
+                { "Flurry",        BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Brain Freeze" },
+                { "Ice Lance",     BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Fingers of Frost" },
+                { "Frozen Orb",    BotRotationCondition::Always },
+                { "Ebonbolt",      BotRotationCondition::Always },
+                { "Frostbolt",     BotRotationCondition::Always }
+            }
+        },
+        // --- Restoration Shaman (specId 264) - Heiler ------------------------------------------
+        // Quelle: Riptide-Erhalt + Healing-Wave/-Surge-Kosten-Abstufung mit HOHER Konfidenz
+        // recherchiert (laut Recherche ueber praktisch ganz Legion stabile Kernidentitaet). "Ziel" ist
+        // hier IMMER das von SelectBotHealTarget() gewaehlte Gruppenmitglied, nicht ein Gegner -
+        // TargetHealthPctBelow greift deshalb identisch wie bei DPS-Rollen, nur bezogen auf das
+        // Heilziel statt einen Feind (siehe BotRotationCondition-Kommentar in BotMgr.h).
+        {
+            264, SPELLFAMILY_SHAMAN, BotRole::Healer,
+            {
+                { "Healing Surge", BotRotationCondition::TargetHealthPctBelow, 35.0f },
+                { "Riptide",       BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Riptide" },
+                { "Chain Heal",    BotRotationCondition::TargetHealthPctBelow, 80.0f },
+                { "Healing Wave",  BotRotationCondition::Always }
+            }
+        }
+    };
+}
+
+uint32 BotMgr::ResolveSpellIdByName(std::string const& englishName, uint32 spellFamily) const
+{
+    // Siehe voller Begruendung im BotMgr.h-Kopfkommentar ("Kampf-KI") und bei g_BotSpecRotations
+    // oben: numerische Spell-IDs sind ueber Patches hinweg NICHT stabil genug, um sie aus einer
+    // Web-Recherche zu uebernehmen. Stattdessen wird hier - nach demselben Muster wie das bereits
+    // existierende GM-Kommando '.lookup spell' (cs_lookup.cpp) - das TATSAECHLICH auf diesem Server
+    // geladene Spell.db2 (Build 26972) nach einem EXAKTEN, gross-/kleinschreibungsunabhaengigen
+    // Namens-Treffer durchsucht, zusaetzlich auf spellFamily gefiltert (verhindert Kollisionen mit
+    // gleichnamigen Faehigkeiten anderer Klassen). Ergebnis ist dadurch garantiert korrekt fuer GENAU
+    // diese Server-Version, unabhaengig davon, ob die urspruengliche Recherchequelle fuer eine andere
+    // Buildnummer eine andere ID hatte.
+    static std::unordered_map<std::string, uint32> resolveCache;
+    std::string cacheKey = std::to_string(spellFamily) + ":" + englishName;
+    auto cacheItr = resolveCache.find(cacheKey);
+    if (cacheItr != resolveCache.end())
+        return cacheItr->second;
+
+    std::wstring wanted;
+    Utf8toWStr(englishName, wanted);
+    wstrToLower(wanted);
+
+    uint32 found = 0;
+    uint32 matchCount = 0;
+    for (uint32 id = 0; id < sSpellMgr->GetSpellInfoStoreSize(); ++id)
+    {
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(id);
+        if (!spellInfo || spellInfo->SpellFamilyName != spellFamily)
+            continue;
+        if (!spellInfo->SpellName || !spellInfo->SpellName->Str[LOCALE_enUS])
+            continue;
+
+        std::wstring candidate;
+        Utf8toWStr(spellInfo->SpellName->Str[LOCALE_enUS], candidate);
+        wstrToLower(candidate);
+        if (candidate == wanted)
+        {
+            if (matchCount == 0)
+                found = id;
+            ++matchCount;
+        }
+    }
+
+    if (matchCount == 0)
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::ResolveSpellIdByName: '%s' (SpellFamilyName %u) wurde in diesem "
+            "Server-Spell.db2 NICHT gefunden - der zugehoerige Rotationsschritt bleibt dauerhaft inaktiv "
+            "(kein Absturz). Moegliche Ursachen: Schreibweise weicht vom recherchierten 7.3.5-Namen ab, oder "
+            "diese Faehigkeit heisst in Build 26972 anders (z.B. Talent-Umbenennung) - mit '.lookup spell "
+            "%s' pruefen.", englishName.c_str(), spellFamily, englishName.c_str());
+    }
+    else if (matchCount > 1)
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::ResolveSpellIdByName: '%s' (SpellFamilyName %u) ist MEHRDEUTIG "
+            "(%u exakte Treffer in Spell.db2) - verwende Spell-Id %u (erster Treffer), das sollte manuell per "
+            "'.lookup spell %s' verifiziert werden.", englishName.c_str(), spellFamily, matchCount, found,
+            englishName.c_str());
+    }
+
+    resolveCache[cacheKey] = found;
+    return found;
+}
+
+BotSpecRotation const* BotMgr::GetOrResolveSpecRotation(uint32 specId) const
+{
+    for (BotSpecRotation const& rotation : g_BotSpecRotations)
+    {
+        if (rotation.SpecId != specId)
+            continue;
+
+        if (!rotation.ResolvedOnce)
+        {
+            for (BotRotationStep const& step : rotation.Priority)
+            {
+                step.ResolvedSpellId = ResolveSpellIdByName(step.SpellName, rotation.SpellFamily);
+                if (step.ConditionAuxSpellName)
+                    step.ResolvedAuxSpellId = ResolveSpellIdByName(step.ConditionAuxSpellName, rotation.SpellFamily);
+            }
+            rotation.ResolvedOnce = true;
+            TC_LOG_INFO("scripts.bots", "BotMgr::GetOrResolveSpecRotation: Rotation fuer specId %u (SpellFamily %u) "
+                "einmalig gegen Spell.db2 aufgeloest (%u Schritte).", specId, rotation.SpellFamily,
+                uint32(rotation.Priority.size()));
+        }
+
+        return &rotation;
+    }
+
+    return nullptr;
+}
+
+bool BotMgr::EvaluateBotRotationCondition(Player* player, Unit* target, BotRotationStep const& step) const
+{
+    switch (step.Condition)
+    {
+        case BotRotationCondition::Always:
+            return true;
+        case BotRotationCondition::TargetHealthPctBelow:
+            return target && target->GetHealthPct() <= step.ConditionValue;
+        case BotRotationCondition::SelfHealthPctBelow:
+            return player->GetHealthPct() <= step.ConditionValue;
+        case BotRotationCondition::ResourceAtLeast:
+            return player->GetPower(Powers(step.ConditionAuxPower)) >= int32(step.ConditionValue);
+        case BotRotationCondition::AuraMissingOnSelf:
+            return step.ResolvedAuxSpellId != 0 && !player->HasAura(step.ResolvedAuxSpellId);
+        case BotRotationCondition::AuraPresentOnSelf:
+            return step.ResolvedAuxSpellId != 0 && player->HasAura(step.ResolvedAuxSpellId);
+        case BotRotationCondition::AuraMissingOnTarget:
+            return step.ResolvedAuxSpellId != 0 && target && !target->HasAura(step.ResolvedAuxSpellId);
+        default:
+            return false;
+    }
+}
+
+Unit* BotMgr::SelectBotCombatTarget(Player* bot) const
+{
+    if (Unit* victim = bot->GetVictim())
+        if (victim->IsAlive())
+            return victim;
+
+    // README-Luecke "kein autonomer Zustandsautomat" (Teilaspekt): kaempft bereits ein
+    // Gruppenmitglied, engagiert der Bot automatisch dasselbe Ziel mit, statt untaetig danebenzustehen
+    // und auf einen manuellen '.bottest attack'-Befehl zu warten. Fuer Nahkampf-naehe Distanz wird
+    // dieselbe Attack()+MoveChase()-Logik wie StartBotAttack() (Runde 122/Nebenbugfix) direkt hier
+    // ausgeloest - fuer Fernkampf/Zauber-Rollen reicht spaeter der reine Reichweiten-/LOS-Check in
+    // ProcessBotCombatAI() vor dem eigentlichen Spruch.
+    if (Group* group = bot->GetGroup())
+    {
+        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            Player* member = itr->GetSource();
+            if (!member || member == bot || !member->IsInWorld())
+                continue;
+
+            Unit* victim = member->GetVictim();
+            if (!victim || !victim->IsAlive() || victim->GetMapId() != bot->GetMapId())
+                continue;
+
+            if (!bot->IsInCombat() && bot->GetDistance(victim) <= BOT_MELEE_ENGAGE_RANGE)
+            {
+                bot->Attack(victim, true);
+                bot->GetMotionMaster()->MoveChase(victim);
+            }
+            return victim;
+        }
+    }
+
+    return nullptr;
+}
+
+Unit* BotMgr::SelectBotHealTarget(Player* bot) const
+{
+    Unit* lowestMember = nullptr;
+    float lowestPct = 100.0f;
+
+    auto consider = [&](Unit* candidate)
+    {
+        if (!candidate || !candidate->IsAlive() || candidate->GetMapId() != bot->GetMapId())
+            return;
+        float pct = candidate->GetHealthPct();
+        if (pct < lowestPct)
+        {
+            lowestPct = pct;
+            lowestMember = candidate;
+        }
+    };
+
+    consider(bot);
+    if (Group* group = bot->GetGroup())
+    {
+        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            Player* member = itr->GetSource();
+            if (member && member != bot)
+                consider(member);
+        }
+    }
+
+    // Bewusst nur zurueckgeben, wenn ueberhaupt jemand unter der Schwelle liegt - sonst tut die
+    // Heiler-Rotation in dieser ersten Runde schlicht nichts (kein Fuellschaden/-heilung ohne Bedarf).
+    return lowestPct <= BOT_HEAL_CONSIDER_THRESHOLD_PCT ? lowestMember : nullptr;
+}
+
+BotRole BotMgr::GetBotRole(uint32 accountId) const
+{
+    Player* player = GetBotPlayer(accountId);
+    if (!player)
+        return BotRole::Unknown;
+
+    if (BotSpecRotation const* rotation = GetOrResolveSpecRotation(player->GetPrimarySpecialization()))
+        return rotation->Role;
+
+    return BotRole::Unknown;
+}
+
+void BotMgr::ProcessBotCombatAI(uint32 accountId, uint32 diff)
+{
+    auto itr = _botSessions.find(accountId);
+    if (itr == _botSessions.end() || !itr->second.Session)
+        return;
+
+    itr->second.CombatAiTickAccumMs += diff;
+    if (itr->second.CombatAiTickAccumMs < BOT_COMBAT_AI_TICK_MS)
+        return;
+    itr->second.CombatAiTickAccumMs = 0;
+
+    Player* player = itr->second.Session->GetPlayer();
+    if (!player || !player->IsInWorld() || !player->IsAlive())
+        return;
+
+    // Laufender Fremd-Zauber (z.B. noch von einer vorherigen Entscheidung) wird nicht abgebrochen/
+    // ueberschrieben ("geclippt") - naechster Versuch beim naechsten Kampf-KI-Tick.
+    if (player->IsNonMeleeSpellCast(false))
+        return;
+
+    BotSpecRotation const* rotation = GetOrResolveSpecRotation(player->GetPrimarySpecialization());
+    if (!rotation)
+        return; // Skillung noch nicht verdrahtet - siehe Kopfkommentar bei g_BotSpecRotations
+
+    Unit* target = rotation->Role == BotRole::Healer ? SelectBotHealTarget(player) : SelectBotCombatTarget(player);
+    if (!target)
+        return;
+
+    for (BotRotationStep const& step : rotation->Priority)
+    {
+        if (!step.ResolvedSpellId)
+            continue; // Namensaufloesung ist fehlgeschlagen (siehe ResolveSpellIdByName()-Fehlerlog)
+
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(step.ResolvedSpellId);
+        if (!spellInfo || !player->HasSpell(step.ResolvedSpellId))
+            continue; // (noch) nicht erlernt, z.B. talentabhaengige Faehigkeit ohne diese Talentwahl
+
+        if (!player->GetSpellHistory()->IsReady(spellInfo))
+            continue;
+
+        if (!EvaluateBotRotationCondition(player, target, step))
+            continue;
+
+        float maxRange = spellInfo->GetMaxRange(false, player);
+        if (maxRange > 0.0f && player->GetDistance(target) > maxRange)
+            continue;
+        if (!player->IsWithinLOSInMap(target))
+            continue;
+
+        if (player->CastSpell(target, step.ResolvedSpellId, TRIGGERED_NONE))
+        {
+            TC_LOG_DEBUG("scripts.bots", "BotMgr::ProcessBotCombatAI: Account %u castet '%s' (Id %u) auf %s.",
+                accountId, step.SpellName, step.ResolvedSpellId, target->GetGUID().ToString().c_str());
+            return; // maximal ein Zauber pro Tick (gemeinsame GCD-Ressource, siehe Kopfkommentar)
+        }
+    }
+}
+
+// Gemeinsamer Hilfscode fuer BotAcceptQuest()/BotTurnInQuest(): loest questGiverSpawnGuid (DB-Spawn-Id
+// aus der `creature`-Tabelle, dieselbe Konvention wie bei StartBotAttack()/BotLootTarget()) zu einer
+// lebenden Creature* auf demselben Map wie der Bot auf. nullptr bei jedem Fehlschlag, jeweils bereits
+// mit TC_LOG_ERROR protokolliert.
+static Creature* ResolveBotQuestGiver(Player* player, ObjectGuid::LowType questGiverSpawnGuid, char const* callerName)
+{
+    CreatureData const* data = sObjectMgr->GetCreatureData(questGiverSpawnGuid);
+    if (!data)
+    {
+        TC_LOG_ERROR("scripts.bots", "%s: keine Spawn-Daten fuer questGiverSpawnGuid " UI64FMTD " gefunden "
+            "(creature-Tabelle).", callerName, questGiverSpawnGuid);
+        return nullptr;
+    }
+
+    if (data->mapid != player->GetMapId())
+    {
+        TC_LOG_ERROR("scripts.bots", "%s: Questgeber-Spawn " UI64FMTD " ist auf Map %u, Bot steht aber auf Map %u.",
+            callerName, questGiverSpawnGuid, data->mapid, player->GetMapId());
+        return nullptr;
+    }
+
+    Creature* questGiver = nullptr;
+    auto range = player->GetMap()->GetCreatureBySpawnIdStore().equal_range(questGiverSpawnGuid);
+    for (auto rangeItr = range.first; rangeItr != range.second; ++rangeItr)
+    {
+        if (rangeItr->second && rangeItr->second->IsInWorld())
+        {
+            questGiver = rangeItr->second;
+            break;
+        }
+    }
+
+    if (!questGiver)
+        TC_LOG_ERROR("scripts.bots", "%s: Questgeber (Spawn " UI64FMTD ") ist aktuell nicht als lebendes Objekt "
+            "im Grid geladen (zu weit weg/nicht gespawnt).", callerName, questGiverSpawnGuid);
+
+    return questGiver;
+}
+
+bool BotMgr::BotAcceptQuest(uint32 accountId, ObjectGuid::LowType questGiverSpawnGuid, uint32 questId)
+{
+    auto itr = _botSessions.find(accountId);
+    if (itr == _botSessions.end() || !itr->second.Session)
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotAcceptQuest: keine Bot-Session fuer Account %u vorhanden.", accountId);
+        return false;
+    }
+
+    Player* player = itr->second.Session->GetPlayer();
+    if (!player || !player->IsInWorld())
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotAcceptQuest: Account %u hat aktuell keinen Player in der Welt "
+            "(erst '.bottest login' ausfuehren).", accountId);
+        return false;
+    }
+
+    Creature* questGiver = ResolveBotQuestGiver(player, questGiverSpawnGuid, "BotMgr::BotAcceptQuest");
+    if (!questGiver)
+        return false;
+
+    if (!questGiver->hasQuest(questId))
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotAcceptQuest: Account %u - Questgeber '%s' (Spawn " UI64FMTD ") "
+            "bietet Quest %u nicht an.", accountId, questGiver->GetName().c_str(), questGiverSpawnGuid, questId);
+        return false;
+    }
+
+    Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+    if (!quest)
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotAcceptQuest: Account %u - Quest-Id %u existiert nicht in "
+            "quest_template.", accountId, questId);
+        return false;
+    }
+
+    // CanTakeQuest()/CanAddQuest() sind dieselben Pruefungen, die auch
+    // WorldSession::HandleQuestgiverAcceptQuestOpcode() vor AddQuestAndCheckCompletion() aufruft
+    // (Level-/Klassen-/Rassen-/Vorquest-/Ruf-Voraussetzungen, bereits aktiv/erledigt, Tagesquest-
+    // Limit etc.) - msg=true schreibt bei Fehlschlag zusaetzlich eine SendSysMessage-Zeile in
+    // Server.log/an den Bot (null-socket-sicher, siehe Kopfkommentar-Referenz).
+    if (!player->CanTakeQuest(quest, true) || !player->CanAddQuest(quest, true))
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotAcceptQuest: Account %u - CanTakeQuest()/CanAddQuest() fuer Quest "
+            "%u ('%s') lieferte false - Voraussetzungen nicht erfuellt oder Quest bereits aktiv/erledigt.",
+            accountId, questId, quest->GetLogTitle().c_str());
+        return false;
+    }
+
+    // Derselbe Aufruf, den HandleQuestgiverAcceptQuestOpcode() selbst nach den obigen Checks macht
+    // (QuestHandler.cpp) - kein Opcode-/Packet-Nachbau noetig, siehe BotMgr.h-Kopfkommentar.
+    player->AddQuestAndCheckCompletion(quest, questGiver);
+
+    TC_LOG_INFO("scripts.bots", "BotMgr::BotAcceptQuest: Account %u - Quest %u ('%s') von Questgeber '%s' "
+        "(Spawn " UI64FMTD ") angenommen.", accountId, questId, quest->GetLogTitle().c_str(),
+        questGiver->GetName().c_str(), questGiverSpawnGuid);
+    return true;
+}
+
+bool BotMgr::BotTurnInQuest(uint32 accountId, ObjectGuid::LowType questGiverSpawnGuid, uint32 questId,
+    uint32 rewardItemChoiceId)
+{
+    auto itr = _botSessions.find(accountId);
+    if (itr == _botSessions.end() || !itr->second.Session)
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotTurnInQuest: keine Bot-Session fuer Account %u vorhanden.", accountId);
+        return false;
+    }
+
+    Player* player = itr->second.Session->GetPlayer();
+    if (!player || !player->IsInWorld())
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotTurnInQuest: Account %u hat aktuell keinen Player in der Welt "
+            "(erst '.bottest login' ausfuehren).", accountId);
+        return false;
+    }
+
+    Creature* questGiver = ResolveBotQuestGiver(player, questGiverSpawnGuid, "BotMgr::BotTurnInQuest");
+    if (!questGiver)
+        return false;
+
+    if (!questGiver->hasInvolvedQuest(questId))
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotTurnInQuest: Account %u - Questgeber '%s' (Spawn " UI64FMTD ") "
+            "nimmt Quest %u nicht entgegen.", accountId, questGiver->GetName().c_str(), questGiverSpawnGuid, questId);
+        return false;
+    }
+
+    Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+    if (!quest)
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotTurnInQuest: Account %u - Quest-Id %u existiert nicht in "
+            "quest_template.", accountId, questId);
+        return false;
+    }
+
+    if (player->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE)
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotTurnInQuest: Account %u - Quest %u ('%s') ist noch nicht "
+            "QUEST_STATUS_COMPLETE (aktueller Status %u) - Zielfortschritt zuerst abschliessen.", accountId,
+            questId, quest->GetLogTitle().c_str(), uint32(player->GetQuestStatus(questId)));
+        return false;
+    }
+
+    if (!player->CanRewardQuest(quest, rewardItemChoiceId, true))
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotTurnInQuest: Account %u - CanRewardQuest() fuer Quest %u ('%s') "
+            "mit rewardItemChoiceId %u lieferte false (ungueltige Belohnungswahl?).", accountId, questId,
+            quest->GetLogTitle().c_str(), rewardItemChoiceId);
+        return false;
+    }
+
+    // Derselbe Aufruf, den HandleQuestgiverChooseRewardOpcode() selbst nach den obigen Checks macht.
+    player->RewardQuest(quest, rewardItemChoiceId, questGiver);
+
+    TC_LOG_INFO("scripts.bots", "BotMgr::BotTurnInQuest: Account %u - Quest %u ('%s') bei Questgeber '%s' "
+        "(Spawn " UI64FMTD ") abgegeben, rewardItemChoiceId %u.", accountId, questId, quest->GetLogTitle().c_str(),
+        questGiver->GetName().c_str(), questGiverSpawnGuid, rewardItemChoiceId);
+    return true;
+}
+
+int32 BotMgr::GetBotQuestStatus(uint32 accountId, uint32 questId) const
+{
+    Player* player = GetBotPlayer(accountId);
+    if (!player)
+        return -1;
+
+    return int32(player->GetQuestStatus(questId));
 }
 
 bool BotMgr::CreateBot(uint32 /*ownerAccountId*/, std::string const& botCharacterName)
