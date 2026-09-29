@@ -203,6 +203,7 @@ class Group;
 class IBotCharacter;
 class Player;
 class Unit;
+class WorldObject;
 class WorldSession;
 struct SpellInfo;
 
@@ -1022,6 +1023,41 @@ public:
     // Fuer die Addon-"STATUS"-Abfrage: Anzahl der Bot-Mitglieder in der Gruppe von "player", die
     // GERADE JETZT IsDungeonClearModeActive()==true haben.
     uint32 CountActiveDungeonClearBotsInGroup(Player* player) const;
+
+    // --- Aktive Selbstdiagnose (Nutzer-Feedback "suche aktiv nach Fehlern und fehlenden Werten") ------
+    //
+    // Zwei konkrete, wiederkehrende Reibungspunkte beim Livetest/Betrieb dieses Moduls, die bisher
+    // manuelles SQL-Nachschlagen bzw. "36 Bots einzeln einloggen und Server.log lesen" erforderten:
+    //
+    //   1. Mehrere '.bottest'-Befehle (attack/loot/questaccept/questturnin) brauchen die DB-Spawn-Id
+    //      (creature.guid) eines Ziel-NPCs - "NPC-Positionen fehlen" ist damit ein wiederkehrendes
+    //      Problem, wenn diese Id nicht bekannt ist. FindNpcSpawnsByName() loest genau das: durchsucht
+    //      die BEREITS GELADENEN Grid-Kreaturen um eine gegebene Position herum nach einem
+    //      Namens-Teilstring und liefert Spawn-Id+Position+Distanz je Treffer zurueck - kein SQL-Zugriff
+    //      noetig, funktioniert nur fuer Kreaturen, deren Grid gerade aktiv ist (derselbe Radius-/
+    //      Sichtbarkeits-Rahmen wie bei FindNearestAggroableTrash() oben).
+    //   2. Ob eine der 36 Skillungs-Rotationen (g_BotSpecRotations, siehe BotMgr.cpp) tatsaechlich
+    //      gegen DIESES Server-Build (26972) aufloest, war bisher nur sichtbar, wenn ein Bot mit genau
+    //      dieser Skillung im Kampf war (TC_LOG_ERROR bei fehlgeschlagener ResolveSpellIdByName()).
+    //      DiagnoseSpecRotations() erzwingt die Aufloesung ALLER 36 Eintraege auf einen Schlag (rein
+    //      lesend, derselbe ResolveSpellIdByName()-Pfad, den auch ein echter Kampf-Tick nutzen wuerde)
+    //      und meldet jeden Namen, der NICHT im aktuell geladenen Spell.db2 gefunden wurde - deckt z.B.
+    //      falsch geratene Brewmaster-Stagger-Aura-Namen oder die als NIEDRIG-Konfidenz markierte
+    //      Demonology-Warlock-Zeile auf, ohne dafuer 36 verschiedene Bots anlegen/ausruesten zu muessen.
+
+    // Kreaturen (lebend ODER tot) innerhalb radius Yards um center, deren Name (creature_template.name,
+    // aktuelle Client-Locale) namePart als Teilstring (case-insensitiv) enthaelt - liefert je Treffer
+    // die DB-Spawn-Id (creature.guid, fuer '.bottest attack/loot/questaccept/questturnin'), Entry,
+    // Distanz und Position als formatierte Zeile. Leerer Vektor, falls nichts (mehr) im geladenen Grid
+    // steht oder kein Treffer passt.
+    std::vector<std::string> FindNpcSpawnsByName(WorldObject const* center, std::string const& namePart,
+        float radius) const;
+
+    // Erzwingt die einmalige Aufloesung ALLER g_BotSpecRotations-Eintraege (nicht nur der bereits per
+    // echtem Bot-Kampf beruehrten) und liefert einen mehrzeiligen Bericht ueber jede Skillung mit
+    // mindestens einem gegen das aktuelle Spell.db2 NICHT aufloesbaren Faehigkeits-/Aura-/Interrupt-/
+    // Dispel-Namen. Rein lesend, ergebnisstabil (derselbe Cache wie im normalen Kampf-KI-Betrieb).
+    std::string DiagnoseSpecRotations() const;
 
     // --- Hooks, die bereits jetzt gefahrlos verdrahtet werden koennen ------
     //

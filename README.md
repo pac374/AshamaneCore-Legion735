@@ -19,6 +19,7 @@ Dieses Repository enthaelt den **C++-Quellcode**: eigene GM-Commands, SmartAI-Er
   * [d) In aktiver Entwicklung](#d-in-aktiver-entwicklung)
   * [e) Roadmap](#e-roadmap---naechste-bausteine-inspiriert-von-aber-neu-gebaut-gegenueber-3.3.5-community-modulen)
 * [Setup / Build](#setup--build)
+* [Befehlsuebersicht](README-Commands.md) - alle "."-Befehle der Custom-Module (Playerbots, Dungeon-Clear, AhBot, OllamaChat)
 * [Mitarbeit](#mitarbeit)
 
 ## Ausgangsbasis & Lizenz
@@ -199,6 +200,13 @@ Zwischenstand - deshalb ein eigener Abschnitt statt (b) oder (c).
   `BotTurnInQuest()`), Toetungs-Kill-Credit laeuft automatisch ueber die normale Core-Logik mit.
 - **Teil-Loesung fuer "kein autonomer Zustandsautomat"**: ein Bot in einer Gruppe engagiert jetzt automatisch
   dasselbe Kampfziel wie ein bereits kaempfendes Gruppenmitglied (`SelectBotCombatTarget()`).
+- **Aktive Debug-Werkzeuge** (Runde 6, Antwort auf "suche aktiv nach Fehlern/fehlenden Werten"):
+  `.bottest findnpc <namePart>` findet die DB-Spawn-Id/Position eines NPCs anhand seines Namens (loest das
+  wiederkehrende "ich kenne die Spawn-Id nicht"-Problem bei `attack`/`loot`/`questaccept`/`questturnin` ohne
+  manuelle SQL-Abfrage); `.bottest diagspells` erzwingt die Aufloesung ALLER 36 Kampf-KI-Rotationen auf
+  einen Schlag und meldet jeden gegen das aktuelle `Spell.db2` nicht aufloesbaren Faehigkeits-/Aura-/
+  Interrupt-/Dispel-Namen. Siehe [README-Commands.md](README-Commands.md) fuer die vollstaendige
+  Befehlsuebersicht aller Custom-Module.
 
 **Was (noch) nicht existiert:**
 
@@ -244,6 +252,18 @@ interessant fuer andere TrinityCore-Entwickler, die Aehnliches versuchen):
    Spielerzustand - im selben spaeten Zeitfenster ebenfalls ein Zugriff auf einen bereits geschlossenen
    DB-Pool. Fix nach demselben Muster: dieser Online-Flag-Reset erfolgt jetzt ebenfalls vorher, waehrend der
    `LoginDatabase`-Pool noch garantiert lebt; der Destruktor bleibt fuer Bot-Sessions vollstaendig DB-frei.
+
+**Runde 6: ein Modul-Kollisions-Fund bei der modulweiten Durchsicht** (kein Core-Fund wie oben, sondern
+zwei eigene Custom-Module, die sich gegenseitig ins Gehege kamen): `PlayerScript::OnChat()` (Whisper-
+Ueberladung) wird fuer JEDE Whisper aufgerufen, ungeachtet ihrer `lang` - sowohl fuer normale sichtbare
+Spieler-Whispers ALS AUCH fuer die neue Addon-Steuernachricht des Dungeon-Clear-Moduls
+(`lang==LANG_ADDON`, siehe Abschnitt e)). Der Ollama-Chat-Hook (`ollamachat_scriptloader.cpp`) filterte
+urspruenglich nicht nach `lang` - eine an einen Bot gerichtete Addon-Nachricht wie `"ASHDC:CMD:ON"` haette
+dadurch versehentlich AUCH die Ollama-LLM ausgeloest und eine sinnlose In-Charakter-Antwort auf den
+Steuertext erzeugt. Fix: der Ollama-Hook ignoriert jetzt explizit `lang==LANG_ADDON` (siehe README-
+Commands.md, Abschnitt "Modul OllamaChat", fuer die dokumentierte Abgrenzung). Gefunden durch eine
+systematische Durchsicht aller `PlayerScript`-Hook-Ueberladungen ueber alle Custom-Module hinweg, nicht
+durch einen Livetest - noch nicht gegen einen laufenden Server verifiziert (siehe Test-Checkliste im PR).
 
 ### e) Roadmap - naechste Bausteine (inspiriert von, aber NEU gebaut gegenueber 3.3.5-Community-Modulen)
 

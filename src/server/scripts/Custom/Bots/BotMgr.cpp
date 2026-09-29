@@ -54,6 +54,7 @@
 #include "GridNotifiersImpl.h"
 #include <cmath>
 #include <sstream>
+#include <iomanip>
 #include <vector>
 #include <unordered_set>
 #include <algorithm>
@@ -3791,6 +3792,96 @@ Creature* BotMgr::FindNearestLootableCorpse(Player* bot, float radius) const
     }
 
     return best;
+}
+
+std::vector<std::string> BotMgr::FindNpcSpawnsByName(WorldObject const* center, std::string const& namePart,
+    float radius) const
+{
+    std::vector<std::string> results;
+    if (!center || !center->GetMap() || namePart.empty())
+        return results;
+
+    std::string needle = namePart;
+    std::transform(needle.begin(), needle.end(), needle.begin(), [](unsigned char c) { return std::tolower(c); });
+
+    // Dieselbe bereits mehrfach bestaetigte Quelle wie FindNearestLivingDungeonBoss()/
+    // FindNearestAggroableTrash() oben - GetCreatureBySpawnIdStore() ist nach creature.guid (der
+    // DB-Spawn-Id) indiziert, genau der Wert, den '.bottest attack/loot/questaccept/questturnin'
+    // erwarten. Nur AKTUELL GELADENE Grids werden gefunden - kein direkter SQL-Zugriff, bewusst so
+    // (siehe BotMgr.h-Kommentar bei FindNpcSpawnsByName()).
+    for (auto const& pair : center->GetMap()->GetCreatureBySpawnIdStore())
+    {
+        Creature* creature = pair.second;
+        if (!creature || !creature->IsInWorld())
+            continue;
+
+        std::string name = creature->GetName();
+        std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
+        if (name.find(needle) == std::string::npos)
+            continue;
+
+        float dist = center->GetDistance(creature);
+        if (dist > radius)
+            continue;
+
+        std::ostringstream line;
+        line << "spawnGuid=" << pair.first << " entry=" << creature->GetEntry() << " name='"
+             << creature->GetName() << "' " << (creature->IsAlive() ? "lebt" : "tot") << " dist="
+             << std::fixed << std::setprecision(1) << dist << "y pos=" << creature->GetPosition().ToString();
+        results.push_back(line.str());
+    }
+
+    std::sort(results.begin(), results.end());
+    return results;
+}
+
+std::string BotMgr::DiagnoseSpecRotations() const
+{
+    std::ostringstream out;
+    uint32 specsWithIssues = 0;
+
+    for (BotSpecRotation const& rotation : g_BotSpecRotations)
+    {
+        // GetOrResolveSpecRotation() loest nur EINMAL PRO PROZESS auf (ResolvedOnce-Flag) - ein
+        // erneuter Aufruf hier ist also immer billig, auch wenn diese Diagnose mehrfach laeuft.
+        GetOrResolveSpecRotation(rotation.SpecId);
+
+        std::vector<std::string> failures;
+        for (BotRotationStep const& step : rotation.Priority)
+        {
+            if (!step.ResolvedSpellId)
+                failures.push_back(std::string(step.SpellName) + " (Prioritaetsschritt)");
+            if (step.ConditionAuxSpellName && !step.ResolvedAuxSpellId)
+                failures.push_back(std::string(step.ConditionAuxSpellName) + " (Bedingungs-Aura)");
+        }
+        if (rotation.InterruptSpellName && !rotation.ResolvedInterruptSpellId)
+            failures.push_back(std::string(rotation.InterruptSpellName) + " (Interrupt)");
+        if (rotation.DispelSpellName && !rotation.ResolvedDispelSpellId)
+            failures.push_back(std::string(rotation.DispelSpellName) + " (Dispel)");
+
+        if (failures.empty())
+            continue;
+
+        ++specsWithIssues;
+        out << "specId " << rotation.SpecId << ": " << failures.size() << " ungeloeste(r) Name(n): ";
+        for (size_t i = 0; i < failures.size(); ++i)
+        {
+            if (i)
+                out << ", ";
+            out << failures[i];
+        }
+        out << "\n";
+    }
+
+    if (specsWithIssues == 0)
+        out << "Alle " << g_BotSpecRotations.size() << " Skillungen: saemtliche Faehigkeits-/Aura-/"
+            "Interrupt-/Dispel-Namen erfolgreich gegen das aktuell geladene Spell.db2 aufgeloest.";
+    else
+        out << specsWithIssues << " von " << g_BotSpecRotations.size() << " Skillungen haben mindestens "
+            "einen ungeloesten Namen (siehe oben) - mit '.lookup spell <Name>' pruefen und den Namen im "
+            "betroffenen g_BotSpecRotations-Eintrag in BotMgr.cpp korrigieren.";
+
+    return out.str();
 }
 
 bool BotMgr::SetDungeonClearMode(uint32 accountId, bool enable)

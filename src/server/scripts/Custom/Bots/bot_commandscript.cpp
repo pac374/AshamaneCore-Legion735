@@ -75,6 +75,8 @@ public:
             { "queststatus",   rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestQuestStatus,   "" },
             { "dungeonclear",  rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestDungeonClear,  "" },
             { "status",        rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestStatus,        "" },
+            { "findnpc",       rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestFindNpc,       "" },
+            { "diagspells",    rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestDiagSpells,    "" },
         };
         static std::vector<ChatCommand> commandTable =
         {
@@ -1051,6 +1053,87 @@ public:
         }
         else
             handler->PSendSysMessage("[bottest] status(account %u): %s - kein Player-Objekt vorhanden.", accountId, stateStr);
+        return true;
+    }
+
+    // .bottest findnpc <namePart> [radius=100] [accountId]
+    // Aktives Debug-Tool (Nutzer-Feedback "NPC-Positionen fehlen, baue ein Tool"): mehrere '.bottest'-
+    // Befehle (attack/loot/questaccept/questturnin) brauchen die DB-Spawn-Id (creature.guid) eines
+    // Ziel-NPCs, die man bisher nur per manueller SQL-Abfrage herausfinden konnte. Dieser Befehl
+    // durchsucht stattdessen die BEREITS GELADENEN Kreaturen um eine Position herum nach einem
+    // Namens-Teilstring (case-insensitiv) und listet Spawn-Id+Position+Distanz je Treffer auf - siehe
+    // BotMgr::FindNpcSpawnsByName() fuer den vollen Code-Review. Zentrum ist standardmaessig der
+    // ausfuehrende GM-Charakter selbst; ohne echten GM-Client (Konsole/RA) stattdessen [accountId]
+    // eines bereits eingeloggten (Bot-)Accounts angeben, dessen Position als Zentrum dient.
+    static bool HandleBotTestFindNpc(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest findnpc <namePart> [radius=100] [accountId] "
+                "(ohne accountId: Position des ausfuehrenden GM-Charakters)");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        std::string namePart;
+        float radius = 100.0f;
+        uint32 accountId = 0;
+        iss >> namePart;
+        if (iss >> radius) { }
+        if (iss >> accountId) { }
+
+        if (namePart.empty())
+        {
+            handler->SendSysMessage("Syntax: .bottest findnpc <namePart> [radius=100] [accountId]");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        WorldObject* center = nullptr;
+        if (accountId != 0)
+            center = sBotMgr->GetBotPlayer(accountId);
+        else if (handler->GetSession() && handler->GetSession()->GetPlayer())
+            center = handler->GetSession()->GetPlayer();
+
+        if (!center)
+        {
+            handler->SendSysMessage("[bottest] findnpc: kein Zentrum gefunden - entweder als echter "
+                "GM-Client aufrufen (kein Konsolen-/RA-Aufruf moeglich) oder [accountId] eines bereits "
+                "eingeloggten (Bot-)Accounts angeben.");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::vector<std::string> results = sBotMgr->FindNpcSpawnsByName(center, namePart, radius);
+        if (results.empty())
+        {
+            handler->PSendSysMessage("[bottest] findnpc('%s', radius %.0f): keine Treffer im aktuell "
+                "geladenen Grid um %s.", namePart.c_str(), radius, center->GetName().c_str());
+            return true;
+        }
+
+        handler->PSendSysMessage("[bottest] findnpc('%s', radius %.0f): %u Treffer um %s -",
+            namePart.c_str(), radius, uint32(results.size()), center->GetName().c_str());
+        for (std::string const& line : results)
+            handler->PSendSysMessage("  %s", line.c_str());
+        return true;
+    }
+
+    // .bottest diagspells
+    // Aktives Debug-Tool (Nutzer-Feedback "suche aktiv nach Fehlern und fehlenden Werten"): erzwingt
+    // die Aufloesung ALLER 36 g_BotSpecRotations-Eintraege auf einen Schlag (siehe
+    // BotMgr::DiagnoseSpecRotations() fuer den vollen Code-Review) und meldet jeden Faehigkeits-/Aura-/
+    // Interrupt-/Dispel-Namen, der gegen das aktuell geladene Spell.db2 (Build 26972) NICHT aufgeloest
+    // werden konnte - ohne dafuer 36 verschieden geskillte Bots anlegen/ausruesten zu muessen.
+    static bool HandleBotTestDiagSpells(ChatHandler* handler, char const* /*args*/)
+    {
+        std::string report = sBotMgr->DiagnoseSpecRotations();
+        std::istringstream lines(report);
+        std::string line;
+        while (std::getline(lines, line))
+            if (!line.empty())
+                handler->PSendSysMessage("[bottest] diagspells: %s", line.c_str());
         return true;
     }
 };

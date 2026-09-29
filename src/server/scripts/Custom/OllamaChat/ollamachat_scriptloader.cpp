@@ -34,15 +34,25 @@ EndScriptData */
 #include "Player.h"
 #include "BotMgr.h"
 #include "OllamaChatMgr.h"
+#include "SharedDefines.h"
 
 class ollamachat_playerscript_chat : public PlayerScript
 {
     public:
         ollamachat_playerscript_chat() : PlayerScript("ollamachat_playerscript_chat") { }
 
-        void OnChat(Player* player, uint32 /*type*/, uint32 /*lang*/, std::string& msg, Player* receiver) override
+        void OnChat(Player* player, uint32 /*type*/, uint32 lang, std::string& msg, Player* receiver) override
         {
             if (!sOllamaChatMgr->IsEnabled() || !receiver)
+                return;
+
+            // Kollisions-Fix (Runde 6, gefunden bei der modulweiten Durchsicht): eine an einen Bot
+            // gerichtete ADDON-Whisper-Nachricht (lang==LANG_ADDON, siehe bot_dungeonclear_control.cpp)
+            // loest DENSELBEN PlayerScript::OnChat()-Whisper-Hook aus wie eine normale Spieler-Whisper -
+            // ohne diesen Filter wuerde z.B. "ASHDC:CMD:ON" versehentlich an die Ollama-LLM als
+            // Chat-Text weitergereicht und eine sinnlose In-Charakter-Antwort erzeugen. Nur echte,
+            // sichtbare Spieler-Whispers (lang!=LANG_ADDON) sollen eine Ollama-Antwort ausloesen.
+            if (lang == LANG_ADDON)
                 return;
 
             // Nur reagieren, wenn EXAKT der Empfaenger ein Bot ist und der Absender KEIN Bot - sonst
