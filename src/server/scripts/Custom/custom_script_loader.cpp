@@ -20,6 +20,7 @@ void AddSC_custom_npcs();
 void AddSC_module_dkskip();
 void AddSC_bot_playerscript_hooks();
 void AddSC_bot_commandscript();
+void AddSC_bot_dungeonclear_control();
 void AddSC_ollamachat_scripts();
 
 // ADM declaration begin
@@ -33,6 +34,7 @@ void AddCustomScripts()
     AddSC_module_dkskip();
     AddSC_bot_playerscript_hooks();
     AddSC_bot_commandscript();
+    AddSC_bot_dungeonclear_control();
     AddSC_ollamachat_scripts();
     // ADM call begin
     // ADM call end

@@ -198,6 +198,8 @@
 #include <string>
 #include <vector>
 
+class DynamicObject;
+class Group;
 class IBotCharacter;
 class Player;
 class Unit;
@@ -278,7 +280,19 @@ struct BotSpecRotation
     uint32 SpellFamily = 0;          // SpellFamilyNames-Enum-Wert, filtert Namenskollisionen zwischen Klassen
     BotRole Role = BotRole::Unknown;
     std::vector<BotRotationStep> Priority;
+
+    // Generische Boss-Mechanik-Reaktionen (siehe voller Design-Kommentar bei
+    // BotMgr::ProcessBotMechanicReactions() unten) - spec-weit statt pro Prioritaetsschritt, weil
+    // Interrupt/Dispel keine normalen Rotationsschritte sind (kein "Ziel je nach Rolle", kein
+    // GCD-Slot-Wettbewerb mit der eigentlichen Rotation - sie werden VOR der Rotation geprueft und
+    // preemptieren sie fuer den aktuellen Tick). Beide optional (nullptr = diese Skillung hat
+    // keine/wird in dieser Runde nicht dafuer verdrahtet).
+    char const* InterruptSpellName = nullptr;
+    char const* DispelSpellName = nullptr;
+
     mutable bool ResolvedOnce = false;
+    mutable uint32 ResolvedInterruptSpellId = 0;
+    mutable uint32 ResolvedDispelSpellId = 0;
 };
 
 class TC_GAME_API BotMgr
@@ -982,6 +996,33 @@ public:
     bool SetDungeonClearMode(uint32 accountId, bool enable);
     bool IsDungeonClearModeActive(uint32 accountId) const;
 
+    // --- Spieler-Steuerung fuer den Dungeon-Clear-Modus (Chat-Schluesselwoerter + Addon-Kanal, siehe
+    // bot_dungeonclear_control.cpp und README Abschnitt e)/mod-dungeon-clear-addon-Ideenreferenz) -----
+    //
+    // Bisher war SetDungeonClearMode() nur ueber den GM-Befehl '.bottest dungeonclear' erreichbar
+    // (RBAC_PERM_COMMAND_ACCOUNT_CREATE) - fuer eine echte Spielernutzung (Chat-Schluesselwort "dc on"
+    // in der eigenen Gruppe, oder ueber ein Addon) braucht es einen Weg, der KEINE GM-Rechte
+    // voraussetzt und automatisch alle Bot-Mitglieder der GRUPPE DES ANFRAGENDEN SPIELERS behandelt,
+    // nicht eine einzelne accountId. Diese drei Methoden sind die gemeinsame Grundlage fuer beide
+    // Steuerwege (Chat-Schluesselwort UND Addon-Nachricht), damit die eigentliche Umschalt-Logik nur
+    // einmal existiert.
+
+    // Reverse-Lookup fuer eine Laufzeit-ObjectGuid -> Bot-Account-Id (0, falls guid kein Bot ist).
+    // Linearer Scan ueber _botSessions, dieselbe Begruendung/Groessenordnung wie IsBotPlayerGuid().
+    uint32 GetBotAccountIdByGuid(ObjectGuid guid) const;
+
+    // Schaltet den Dungeon-Clear-Modus fuer ALLE Bot-Mitglieder der aktuellen Gruppe von "requester"
+    // (ein echter Spieler ODER ein anderer Bot - keine GM-Pruefung hier, das ist bewusst: jedes
+    // Gruppenmitglied darf die Bots der EIGENEN Gruppe steuern, dieselbe Berechtigungsgrenze wie ein
+    // normaler Party-Invite/-Kick). Liefert die Anzahl tatsaechlich umgeschalteter Bots (0, falls
+    // requester in keiner Gruppe ist oder keine Bots in der Gruppe sind, oder falls SetDungeonClearMode()
+    // fuer jeden einzelnen Bot fehlschlaegt, z.B. weil keiner von ihnen auf einer Dungeon-Karte steht).
+    uint32 SetDungeonClearModeForPlayerGroup(Player* requester, bool enable);
+
+    // Fuer die Addon-"STATUS"-Abfrage: Anzahl der Bot-Mitglieder in der Gruppe von "player", die
+    // GERADE JETZT IsDungeonClearModeActive()==true haben.
+    uint32 CountActiveDungeonClearBotsInGroup(Player* player) const;
+
     // --- Hooks, die bereits jetzt gefahrlos verdrahtet werden koennen ------
     //
     // Werden aus PlayerScript-Hooks (bot_scriptloader.cpp) fuer JEDEN
@@ -1053,6 +1094,43 @@ private:
     // Naechste lootbare (bereits tote, UNIT_DYNFLAG_LOOTABLE) Leiche innerhalb radius Yards - genutzt, um
     // nach einem Kill automatisch BotLootTarget() aufzurufen, bevor zum naechsten Ziel weitergeroutet wird.
     Creature* FindNearestLootableCorpse(Player* bot, float radius) const;
+
+    // --- Generische Boss-Mechanik-Reaktionen (Ideenreferenz: Nutzer-Feedback "Bots brauchen Wissen
+    // ueber Boss-Mechaniken, sonst haben sie keine Ahnung was zu tun ist") ----------------------------
+    //
+    // Kernproblem: Legion-Dungeon-Boss-Mechaniken sind NICHT recherchiert (siehe README-Roadmap) - eine
+    // Wissensdatenbank "Boss X macht bei Y% Mechanik Z, weiche nach Sueden aus" existiert nicht und
+    // waere ein eigenes, sehr grosses Rechercheprojekt pro Dungeon/Boss. Diese Runde loest stattdessen
+    // das, was OHNE Boss-spezifische Daten bereits generisch aus dem Core herleitbar ist (per
+    // Recherche bestaetigt, siehe BotMgr.cpp-Kommentar bei ProcessBotMechanicReactions()):
+    //   1. Gefaehrliche Bodeneffekte verlassen (jede persistente Flaechen-Aura, nicht nur bekannte) -
+    //      DynamicObject::GetSpellInfo()->IsPositive()==false + Bot steht innerhalb GetRadius().
+    //   2. Gegnerische Zauber unterbrechen, wenn die Skillung einen Interrupt hat - der Core prueft
+    //      beim Cast der Interrupt-Faehigkeit selbst, ob das Ziel gerade unterbrechbar castet
+    //      (Spell::EffectInterruptCast()) - der Bot muss nur "casted das Ziel gerade ueberhaupt etwas"
+    //      pruefen und dann draufhalten, kein Fehlversuch-Risiko.
+    //   3. Gefaehrliche, entfernbare Debuffs von sich/Gruppenmitgliedern dispellen, wenn die Skillung
+    //      einen Dispel hat - der Core waehlt die zu entfernende Aura selbst aus
+    //      (Unit::GetDispellableAuraList()/Spell::EffectDispel()).
+    // Das ist AUSDRUECKLICH KEIN Ersatz fuer echtes Boss-Mechanik-Skripting (Ausweich-Positionen, Soak-
+    // Mechaniken, Phasenwechsel, Adds-Prioritaet etc. bleiben unbehandelt, da dafuer eine Boss-genaue
+    // Wissensbasis noetig waere) - es ist die generische Teilmenge, die jeder Encounter (in JEDER
+    // Instanz, nicht nur Legion-Dungeons) gemeinsam hat.
+
+    // Wird von ProcessBotCombatAI() VOR der eigentlichen Rotationsschleife aufgerufen (siehe dort) -
+    // liefert true, wenn eine Mechanik-Reaktion diesen Tick bereits "verbraucht" hat (Interrupt/Dispel
+    // gecastet ODER eine Fluchtbewegung ausgeloest), die normale Rotation wird dann fuer diesen Tick
+    // uebersprungen (Sicherheit vor Schadensoutput).
+    bool ProcessBotMechanicReactions(Player* bot, BotSpecRotation const* rotation, Unit* combatTarget,
+        Unit* healTarget);
+
+    // Naechstes DynamicObject (persistente Flaechen-Aura) innerhalb radius Yards, dessen Zauber laut
+    // SpellInfo::IsPositive() SCHAEDLICH ist UND in dessen GetRadius() der Bot aktuell tatsaechlich
+    // steht (zwei getrennte Radien: Suchradius vs. tatsaechlicher Wirkradius des Effekts selbst) -
+    // sonst nullptr. Neu geschriebener Grid-Suchcode (kein bestehender Helfer dafuer im Core
+    // gefunden, siehe Rechercheergebnis) nach demselben Muster wie das bereits im Core vorhandene
+    // Unit::GetAreatriggerListInRange().
+    DynamicObject* FindHarmfulGroundEffectUnderBot(Player* bot, float searchRadius) const;
 
     // Absichtlich leer in dieser Runde - kein Bot kann derzeit angelegt werden.
     std::unordered_map<ObjectGuid, std::unique_ptr<IBotCharacter>> _bots;

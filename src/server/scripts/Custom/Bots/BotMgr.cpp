@@ -48,6 +48,10 @@
 #include "SpellHistory.h"
 #include "Util.h"
 #include "QuestDef.h"
+#include "DynamicObject.h"
+#include "SpellAuras.h"
+#include "CellImpl.h"
+#include "GridNotifiersImpl.h"
 #include <cmath>
 #include <sstream>
 #include <vector>
@@ -2598,7 +2602,8 @@ namespace
                 { "Revenge",       BotRotationCondition::Always },
                 { "Shield Slam",   BotRotationCondition::Always },
                 { "Devastate",     BotRotationCondition::Always }
-            }
+            },
+            "Pummel"
         },
         // --- Fury Warrior (specId 72) - Nahkampf-DPS -------------------------------------------
         // Quelle: Bloodthirst/Raging Blow/Rampage-Kernschleife mit MITTEL-HOHER Konfidenz recherchiert
@@ -2612,7 +2617,8 @@ namespace
                 { "Rampage",       BotRotationCondition::ResourceAtLeast,     80.0f, POWER_RAGE },
                 { "Execute",       BotRotationCondition::TargetHealthPctBelow, 20.0f },
                 { "Whirlwind",     BotRotationCondition::Always }
-            }
+            },
+            "Pummel"
         },
         // --- Frost Mage (specId 64) - Fernkampf/Zauber-DPS -------------------------------------
         // Quelle: Brain-Freeze->Flurry->Ice-Lance-"Shatter" und Fingers-of-Frost-Verbrauch mit HOHER
@@ -2627,7 +2633,8 @@ namespace
                 { "Frozen Orb",    BotRotationCondition::Always },
                 { "Ebonbolt",      BotRotationCondition::Always },
                 { "Frostbolt",     BotRotationCondition::Always }
-            }
+            },
+            "Counterspell"
         },
         // --- Restoration Shaman (specId 264) - Heiler ------------------------------------------
         // Quelle: Riptide-Erhalt + Healing-Wave/-Surge-Kosten-Abstufung mit HOHER Konfidenz
@@ -2642,7 +2649,8 @@ namespace
                 { "Riptide",       BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Riptide" },
                 { "Chain Heal",    BotRotationCondition::TargetHealthPctBelow, 80.0f },
                 { "Healing Wave",  BotRotationCondition::Always }
-            }
+            },
+            nullptr, "Purify Spirit"
         },
 
         // ==================== Runde 2: 25 weitere Skillungen (siehe Kopfkommentar oben) ====================
@@ -2659,7 +2667,8 @@ namespace
                 { "Execute",        BotRotationCondition::TargetHealthPctBelow, 20.0f },
                 { "Overpower",      BotRotationCondition::Always },
                 { "Slam",           BotRotationCondition::Always }
-            }
+            },
+            "Pummel"
         },
         // --- Paladin Protection (specId 66) - Tank --- HOCH auf "Shield of the Righteous halten"-
         // Kernidentitaet, MITTEL auf Avenger's-Shield-vs-Judgment-Feinreihenfolge.
@@ -2671,7 +2680,8 @@ namespace
                 { "Avenger's Shield",        BotRotationCondition::Always },
                 { "Consecration",            BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Consecration" },
                 { "Hammer of the Righteous", BotRotationCondition::Always }
-            }
+            },
+            "Rebuke"
         },
         // --- Paladin Retribution (specId 70) - Nahkampf-DPS --- MITTEL-HOCH: Judgment-Fenster-
         // Mechanik (Templar's Verdict bevorzugt waehrend des Judgment-Debuffs) recherchiert, hier
@@ -2683,7 +2693,8 @@ namespace
                 { "Templar's Verdict", BotRotationCondition::ResourceAtLeast, 3.0f, POWER_HOLY_POWER },
                 { "Blade of Justice", BotRotationCondition::Always },
                 { "Crusader Strike",  BotRotationCondition::Always }
-            }
+            },
+            "Rebuke"
         },
         // --- Paladin Holy (specId 65) - Heiler --- HOCH: Beacon-of-Light/Holy-Shock-Kernidentitaet.
         // Light of Dawn (AoE-Holy-Power-Spender) bewusst weggelassen - Framework hat aktuell kein
@@ -2695,7 +2706,8 @@ namespace
                 { "Holy Shock",      BotRotationCondition::Always },
                 { "Flash of Light",  BotRotationCondition::TargetHealthPctBelow, 50.0f },
                 { "Holy Light",      BotRotationCondition::Always }
-            }
+            },
+            nullptr, "Cleanse"
         },
         // --- Death Knight Blood (specId 250) - Tank --- MITTEL: Death-Strike/Bone-Shield-Kernloop
         // korrekt, aber exakte Bone-Shield-Stack-Schwelle/Rune-Kosten laut Recherche selbst nicht
@@ -2706,7 +2718,8 @@ namespace
                 { "Marrowrend",  BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Bone Shield" },
                 { "Death Strike", BotRotationCondition::ResourceAtLeast, 45.0f, POWER_RUNIC_POWER },
                 { "Heart Strike", BotRotationCondition::Always }
-            }
+            },
+            "Mind Freeze"
         },
         // --- Death Knight Frost (specId 251) - Nahkampf-DPS --- MITTEL-HOCH, inkl. 7.3.5-spezifischem
         // Disintegration-Talent-Detail (Killing-Machine-Verlaengerung durch Frost Strike/Howling
@@ -2718,7 +2731,8 @@ namespace
                 { "Frost Strike", BotRotationCondition::ResourceAtLeast, 60.0f, POWER_RUNIC_POWER },
                 { "Howling Blast", BotRotationCondition::Always },
                 { "Remorseless Winter", BotRotationCondition::Always }
-            }
+            },
+            "Mind Freeze"
         },
         // --- Death Knight Unholy (specId 252) - Nahkampf-DPS --- MITTEL-HOCH (Festering-Wound-
         // Builder/Popper-Loop und die genannten Talente sind gut belegt). Apocalypse (Wound-Stack-
@@ -2730,7 +2744,8 @@ namespace
                 { "Scourge Strike",   BotRotationCondition::Always },
                 { "Death Coil",       BotRotationCondition::ResourceAtLeast, 60.0f, POWER_RUNIC_POWER },
                 { "Outbreak",         BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Virulent Plague" }
-            }
+            },
+            "Mind Freeze"
         },
         // --- Rogue Assassination (specId 259) - Nahkampf-DPS --- MITTEL-HOCH, explizit als 7.3.5-
         // Quelle bestaetigt (guiaswow.com "Patch 7.3.5"-Seite).
@@ -2741,7 +2756,8 @@ namespace
                 { "Rupture",  BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Rupture" },
                 { "Envenom",  BotRotationCondition::ResourceAtLeast, 4.0f, POWER_COMBO_POINTS },
                 { "Mutilate", BotRotationCondition::Always }
-            }
+            },
+            "Kick"
         },
         // --- Rogue Outlaw (specId 260) - Nahkampf-DPS --- MITTEL: Roll-the-Bones-"Reroll wenn
         // schlechte Wuerfe"-Feinlogik ist laut Recherche selbst patchabhaengig/umstritten und deshalb
@@ -2753,7 +2769,8 @@ namespace
                 { "Roll the Bones",  BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Roll the Bones" },
                 { "Between the Eyes", BotRotationCondition::ResourceAtLeast, 5.0f, POWER_COMBO_POINTS },
                 { "Saber Slash",     BotRotationCondition::Always }
-            }
+            },
+            "Kick"
         },
         // --- Rogue Subtlety (specId 261) - Nahkampf-DPS --- MITTEL-HOCH inkl. konkretem Opener aus der
         // Recherche (hier nur die Kernschleife, kein separater Opener-Zustand).
@@ -2764,7 +2781,8 @@ namespace
                 { "Nightblade",       BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Nightblade" },
                 { "Eviscerate",       BotRotationCondition::ResourceAtLeast, 5.0f, POWER_COMBO_POINTS },
                 { "Backstab",         BotRotationCondition::Always }
-            }
+            },
+            "Kick"
         },
         // --- Demon Hunter Havoc (specId 577) - Nahkampf-DPS --- MITTEL-HOCH. Momentum-Build (Fel Rush
         // offensiv fuer den Buff nutzen) bewusst weggelassen - talentabhaengige Sonderlogik.
@@ -2775,7 +2793,8 @@ namespace
                 { "Blade Dance",  BotRotationCondition::Always },
                 { "Eye Beam",     BotRotationCondition::Always },
                 { "Demon's Bite", BotRotationCondition::Always }
-            }
+            },
+            "Disrupt"
         },
         // --- Demon Hunter Vengeance (specId 581) - Tank --- MITTEL: Soul-Fragment-Zaehler (steuert
         // Soul-Cleave-vs-Spirit-Bomb-Wahl) nicht modelliert - hier fest auf den Soul-Cleave-Build
@@ -2787,7 +2806,8 @@ namespace
                 { "Demon Spikes",    BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Demon Spikes" },
                 { "Sigil of Flame",  BotRotationCondition::Always },
                 { "Soul Cleave",     BotRotationCondition::Always }
-            }
+            },
+            "Disrupt"
         },
         // --- Mage Arcane (specId 62) - Fernkampf/Zauber-DPS --- HOCH: Arcane-Charges sind in diesem
         // Core als echte Ressource (POWER_ARCANE_CHARGES) implementiert, passt direkt ins
@@ -2799,7 +2819,8 @@ namespace
                 { "Arcane Missiles", BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Clearcasting" },
                 { "Arcane Barrage",  BotRotationCondition::ResourceAtLeast, 4.0f, POWER_ARCANE_CHARGES },
                 { "Arcane Blast",    BotRotationCondition::Always }
-            }
+            },
+            "Counterspell"
         },
         // --- Mage Fire (specId 63) - Fernkampf/Zauber-DPS --- HOCH auf die Hot-Streak/Heating-Up-
         // Proc-Kernschleife. Combustion-Cooldown-Timing (auf Hot Streak warten, dann pop) bewusst
@@ -2812,7 +2833,8 @@ namespace
                 { "Fire Blast",      BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Heating Up" },
                 { "Phoenix's Flames", BotRotationCondition::Always },
                 { "Fireball",        BotRotationCondition::Always }
-            }
+            },
+            "Counterspell"
         },
         // --- Warlock Affliction (specId 265) - Fernkampf/Zauber-DPS --- HOCH auf die
         // Agony/Corruption/Unstable-Affliction-Dauerpflege-Identitaet.
@@ -2859,7 +2881,8 @@ namespace
                 { "Flash Heal", BotRotationCondition::TargetHealthPctBelow, 40.0f },
                 { "Renew",      BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Renew" },
                 { "Heal",       BotRotationCondition::Always }
-            }
+            },
+            nullptr, "Dispel Magic"
         },
         // --- Shaman Elemental (specId 262) - Fernkampf/Zauber-DPS --- HOCH auf Flame-Shock/Lava-Burst/
         // Maelstrom-Kernschleife (direkt analog zu Immolate/Destruction oben).
@@ -2870,7 +2893,8 @@ namespace
                 { "Earth Shock",   BotRotationCondition::ResourceAtLeast, 60.0f, POWER_MAELSTROM },
                 { "Flame Shock",   BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Flame Shock" },
                 { "Lightning Bolt", BotRotationCondition::Always }
-            }
+            },
+            "Wind Shear"
         },
         // --- Druid Balance (specId 102) - Fernkampf/Zauber-DPS --- HOCH auf Moonfire/Sunfire-
         // Dauerpflege. Astral Power ist in diesem Core ueber POWER_LUNAR_POWER hinterlegt (historischer
@@ -2895,7 +2919,8 @@ namespace
                 { "Rejuvenation", BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Rejuvenation" },
                 { "Regrowth",     BotRotationCondition::TargetHealthPctBelow, 50.0f },
                 { "Wild Growth",  BotRotationCondition::TargetHealthPctBelow, 80.0f }
-            }
+            },
+            nullptr, "Remove Corruption"
         },
         // --- Monk Mistweaver (specId 270) - Heiler --- HOCH auf Renewing-Mist/Vivify/Enveloping-Mist-
         // Kernidentitaet. Soothing-Mist-Channel-Interaktion (erlaubt Bewegung waehrend andere Zauber
@@ -2906,7 +2931,8 @@ namespace
                 { "Renewing Mist",  BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Renewing Mist" },
                 { "Enveloping Mist", BotRotationCondition::TargetHealthPctBelow, 50.0f },
                 { "Vivify",         BotRotationCondition::Always }
-            }
+            },
+            nullptr, "Detox"
         },
         // --- Hunter Beast Mastery (specId 253) - Fernkampf-DPS --- MITTEL-HOCH auf Kill-Command/
         // Barbed-Shot/Bestial-Wrath-Kernschleife. Frenzy-Stack-Pflege auf dem PET (nicht dem Bot
@@ -2919,7 +2945,8 @@ namespace
                 { "Barbed Shot",  BotRotationCondition::Always },
                 { "Bestial Wrath", BotRotationCondition::Always },
                 { "Cobra Shot",   BotRotationCondition::Always }
-            }
+            },
+            "Counter Shot"
         },
         // --- Hunter Marksmanship (specId 254) - Fernkampf-DPS --- MITTEL: "Vulnerable"-Debuff-Synergie
         // (Aimed Shot/Marked Shot bevorzugt WAEHREND Vulnerable aktiv ist) nicht modelliert - beide
@@ -2930,7 +2957,8 @@ namespace
             {
                 { "Aimed Shot",  BotRotationCondition::Always },
                 { "Arcane Shot", BotRotationCondition::Always }
-            }
+            },
+            "Counter Shot"
         },
         // --- Hunter Survival (specId 255) - Nahkampf-DPS --- MITTEL. WICHTIG: in Legion ist Survival
         // eine NAHKAMPF-Skillung (Wildfire Bomb/Raptor Strike/Mongoose Bite) - komplett anders als in
@@ -2943,7 +2971,8 @@ namespace
                 { "Wildfire Bomb",  BotRotationCondition::Always },
                 { "Serpent Sting",  BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Serpent Sting" },
                 { "Raptor Strike",  BotRotationCondition::Always }
-            }
+            },
+            "Counter Shot"
         },
 
         // ==================== Runde 3: die 4 zuvor mit Begruendung ausgelassenen Skillungen, jetzt ====
@@ -2968,7 +2997,8 @@ namespace
                     BotRotationTargetOverride::ForceHealTarget },
                 { "Smite",              BotRotationCondition::Always, 0.0f, 0, nullptr,
                     BotRotationTargetOverride::ForceEnemy }
-            }
+            },
+            nullptr, "Dispel Magic"
         },
         // --- Monk Brewmaster (specId 268) - Tank --- HOCH auf die Stagger/Ironskin-Brew/Purifying-
         // Brew-Ladungs-Mechanik als KONZEPT, MITTEL auf die konkrete Umsetzung hier: die echte Client-
@@ -2987,7 +3017,8 @@ namespace
                 { "Keg Smash",      BotRotationCondition::Always },
                 { "Blackout Strike", BotRotationCondition::Always },
                 { "Tiger Palm",     BotRotationCondition::Always }
-            }
+            },
+            "Spear Hand Strike"
         },
         // --- Monk Windwalker (specId 269) - Nahkampf-DPS --- MITTEL-HOCH auf die Namen/Grundreihenfolge
         // (Fists of Fury vor Rising Sun Kick vor Whirling Dragon Punch), NIEDRIG auf die exakte Combo-
@@ -3006,7 +3037,8 @@ namespace
                 { "Rising Sun Kick",      BotRotationCondition::Always },
                 { "Whirling Dragon Punch", BotRotationCondition::Always },
                 { "Tiger Palm",           BotRotationCondition::Always }
-            }
+            },
+            "Spear Hand Strike"
         },
         // --- Warlock Demonology (specId 266) - Fernkampf/Zauber-DPS --- NIEDRIG (von der urspruenglichen
         // Recherche selbst so markiert: Demonology wurde waehrend Legion mehrfach grundlegend
@@ -3041,7 +3073,8 @@ namespace
                 { "Stormstrike",  BotRotationCondition::Always },
                 { "Lava Lash",    BotRotationCondition::Always },
                 { "Boulderfist",  BotRotationCondition::Always }
-            }
+            },
+            "Wind Shear"
         },
         // --- Druid Feral (specId 103) - Nahkampf-DPS --- HOCH auf die Rake/Rip/Savage-Roar-Dauerpflege-
         // Identitaet (7.3.5-spezifisch bestaetigt: Savage-Roar-Dauer erhoeht/Schadensbonus gesenkt
@@ -3059,7 +3092,8 @@ namespace
                 { "Rip",            BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Rip" },
                 { "Ferocious Bite", BotRotationCondition::ResourceAtLeast, 5.0f, POWER_COMBO_POINTS },
                 { "Shred",          BotRotationCondition::Always }
-            }
+            },
+            "Skull Bash"
         },
         // --- Druid Guardian (specId 104) - Tank --- HOCH: Ironfur als kontinuierlich zu erneuernde
         // aktive Mitigation ist derselbe "diese Faehigkeit hochhalten"-Musterfall wie Shield Block
@@ -3073,7 +3107,8 @@ namespace
                 { "Thrash",  BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Thrash" },
                 { "Moonfire", BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Moonfire" },
                 { "Maul",    BotRotationCondition::Always }
-            }
+            },
+            "Skull Bash"
         }
     };
 }
@@ -3155,6 +3190,10 @@ BotSpecRotation const* BotMgr::GetOrResolveSpecRotation(uint32 specId) const
                 if (step.ConditionAuxSpellName)
                     step.ResolvedAuxSpellId = ResolveSpellIdByName(step.ConditionAuxSpellName, rotation.SpellFamily);
             }
+            if (rotation.InterruptSpellName)
+                rotation.ResolvedInterruptSpellId = ResolveSpellIdByName(rotation.InterruptSpellName, rotation.SpellFamily);
+            if (rotation.DispelSpellName)
+                rotation.ResolvedDispelSpellId = ResolveSpellIdByName(rotation.DispelSpellName, rotation.SpellFamily);
             rotation.ResolvedOnce = true;
             TC_LOG_INFO("scripts.bots", "BotMgr::GetOrResolveSpecRotation: Rotation fuer specId %u (SpellFamily %u) "
                 "einmalig gegen Spell.db2 aufgeloest (%u Schritte).", specId, rotation.SpellFamily,
@@ -3306,6 +3345,11 @@ void BotMgr::ProcessBotCombatAI(uint32 accountId, uint32 diff)
     if (!combatTarget && !healTarget)
         return; // weder ein Kampfziel noch ein Heilbedarf - fuer diese Skillung aktuell nichts zu tun
 
+    // Generische Boss-Mechanik-Reaktionen (Ausweichen/Interrupt/Dispel, siehe BotMgr.h-Kommentar bei
+    // ProcessBotMechanicReactions()) haben Vorrang vor der normalen Rotation.
+    if (ProcessBotMechanicReactions(player, rotation, combatTarget, healTarget))
+        return;
+
     for (BotRotationStep const& step : rotation->Priority)
     {
         if (!step.ResolvedSpellId)
@@ -3343,6 +3387,159 @@ void BotMgr::ProcessBotCombatAI(uint32 accountId, uint32 diff)
             return; // maximal ein Zauber pro Tick (gemeinsame GCD-Ressource, siehe Kopfkommentar)
         }
     }
+}
+
+namespace
+{
+    // Check-Funktor fuer FindHarmfulGroundEffectUnderBot()/WorldObjectListSearcher<Check> (siehe
+    // BotMgr.h-Kommentar bei ProcessBotMechanicReactions()). WorldObjectListSearcher<Check> ruft
+    // i_check(...) fuer JEDEN WorldObject-Untertyp auf, der in einer Grid-/World-Zelle vorkommen kann
+    // (Player/Creature/Corpse/GameObject/DynamicObject/AreaTrigger/SceneObject/Conversation - siehe
+    // GridNotifiersImpl.h), nicht nur fuer den einen Typ, an dem dieser Suchcode interessiert ist -
+    // anders als der schmalere AreaTriggerListSearcher<Check>, der nur AreaTrigger* kennt. Der
+    // Ueberladungs-Vorrang von C++ (nicht-Template-Ueberladung schlaegt Template-Instanziierung)
+    // erlaubt hier einen generischen Fallback fuer alle "uninteressanten" Typen plus genau eine
+    // konkrete Ueberladung fuer DynamicObject*, ohne dass fuer jeden Typ einzeln eine leere
+    // Ueberladung geschrieben werden muesste.
+    class BotHarmfulDynObjCheck
+    {
+    public:
+        BotHarmfulDynObjCheck(WorldObject const* searcher, float range) : _searcher(searcher), _range(range) { }
+
+        template<typename T>
+        bool operator()(T*) const { return false; }
+
+        bool operator()(DynamicObject* dynObj) const
+        {
+            return _searcher->IsWithinDistInMap(dynObj, _range);
+        }
+
+    private:
+        WorldObject const* _searcher;
+        float _range;
+    };
+}
+
+DynamicObject* BotMgr::FindHarmfulGroundEffectUnderBot(Player* bot, float searchRadius) const
+{
+    std::list<WorldObject*> candidates;
+
+    CellCoord cellCoord(Trinity::ComputeCellCoord(bot->GetPositionX(), bot->GetPositionY()));
+    Cell cell(cellCoord);
+    cell.SetNoCreate();
+
+    BotHarmfulDynObjCheck check(bot, searchRadius);
+    Trinity::WorldObjectListSearcher<BotHarmfulDynObjCheck> searcher(bot, candidates, check,
+        GRID_MAP_TYPE_MASK_DYNAMICOBJECT);
+
+    TypeContainerVisitor<Trinity::WorldObjectListSearcher<BotHarmfulDynObjCheck>, WorldTypeMapContainer> worldVisitor(searcher);
+    TypeContainerVisitor<Trinity::WorldObjectListSearcher<BotHarmfulDynObjCheck>, GridTypeMapContainer> gridVisitor(searcher);
+
+    cell.Visit(cellCoord, worldVisitor, *bot->GetMap(), *bot, searchRadius);
+    cell.Visit(cellCoord, gridVisitor, *bot->GetMap(), *bot, searchRadius);
+
+    for (WorldObject* candidate : candidates)
+    {
+        DynamicObject* dynObj = candidate->ToDynObject();
+        if (!dynObj)
+            continue;
+
+        // Nur SCHAEDLICHE persistente Flaecheneffekte sind fuer die Ausweich-Logik relevant (positive
+        // Bodeneffekte, z.B. Heil-Totems/-Zonen, sollen der Bot natuerlich nicht verlassen).
+        SpellInfo const* spellInfo = dynObj->GetSpellInfo();
+        if (!spellInfo || spellInfo->IsPositive())
+            continue;
+
+        // Zwei getrennte Radien (siehe BotMgr.h-Kommentar): searchRadius nur fuer die Grid-Vorauswahl,
+        // hier zaehlt einzig der TATSAECHLICHE Wirkradius des Effekts selbst.
+        if (bot->GetExactDist2d(dynObj) <= dynObj->GetRadius())
+            return dynObj;
+    }
+
+    return nullptr;
+}
+
+bool BotMgr::ProcessBotMechanicReactions(Player* bot, BotSpecRotation const* rotation, Unit* combatTarget,
+    Unit* healTarget)
+{
+    // 1. Gefaehrlichen Bodeneffekt verlassen - hoechste Prioritaet, da Steh'nbleiben potentiell toedlich
+    // ist, waehrend Interrupt/Dispel "nur" DPS/Heilausfall bedeuten. Suchradius bewusst klein gewaehlt
+    // (der Bot steht ja bereits im/nahe am Effekt, wenn dieser ueberhaupt relevant wird).
+    if (DynamicObject* harmfulEffect = FindHarmfulGroundEffectUnderBot(bot, 15.0f))
+    {
+        float fleeX, fleeY, fleeZ;
+        // Radial vom Effektzentrum weg, ueber den Wirkradius hinaus (plus Sicherheitsabstand) -
+        // MovePoint(generatePath=true) uebernimmt die eigentliche Navmesh-Route dorthin, damit der Bot
+        // nicht durch Waende/von Klippen "flieht".
+        float angle = harmfulEffect->GetAngle(bot);
+        float distance = harmfulEffect->GetRadius() + 5.0f;
+        fleeX = harmfulEffect->GetPositionX() + std::cos(angle) * distance;
+        fleeY = harmfulEffect->GetPositionY() + std::sin(angle) * distance;
+        fleeZ = harmfulEffect->GetPositionZ();
+        bot->GetMotionMaster()->MovePoint(0, fleeX, fleeY, fleeZ, true);
+
+        TC_LOG_DEBUG("scripts.bots", "BotMgr::ProcessBotMechanicReactions: Bot %s weicht Bodeneffekt "
+            "(Spell %u) aus.", bot->GetGUID().ToString().c_str(), harmfulEffect->GetSpellId());
+        return true;
+    }
+
+    // 2. Interrupt - nur, wenn die Skillung ueberhaupt eine hat (siehe g_BotSpecRotations) und der
+    // Bot sie bereits erlernt hat/sie einsatzbereit ist. Der Core prueft beim tatsaechlichen Cast von
+    // Spell::EffectInterruptCast() selbst, ob combatTarget gerade unterbrechbar castet - hier reicht
+    // die billige Vorabpruefung "castet ueberhaupt gerade etwas", um unnoetige Fehlversuche zu vermeiden.
+    if (rotation->ResolvedInterruptSpellId && combatTarget)
+    {
+        bool targetIsCasting = combatTarget->GetCurrentSpell(CURRENT_GENERIC_SPELL) != nullptr
+            || combatTarget->GetCurrentSpell(CURRENT_CHANNELED_SPELL) != nullptr;
+
+        if (targetIsCasting && bot->HasSpell(rotation->ResolvedInterruptSpellId))
+        {
+            if (SpellInfo const* interruptInfo = sSpellMgr->GetSpellInfo(rotation->ResolvedInterruptSpellId))
+            {
+                if (bot->GetSpellHistory()->IsReady(interruptInfo)
+                    && bot->GetDistance(combatTarget) <= interruptInfo->GetMaxRange(false, bot)
+                    && bot->IsWithinLOSInMap(combatTarget))
+                {
+                    if (bot->CastSpell(combatTarget, rotation->ResolvedInterruptSpellId, TRIGGERED_NONE))
+                    {
+                        TC_LOG_DEBUG("scripts.bots", "BotMgr::ProcessBotMechanicReactions: Bot %s "
+                            "unterbricht %s (Interrupt-Spell %u).", bot->GetGUID().ToString().c_str(),
+                            combatTarget->GetGUID().ToString().c_str(), rotation->ResolvedInterruptSpellId);
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Dispel - der Core waehlt die zu entfernende Aura selbst aus (Unit::GetDispellableAuraList(),
+    // dieselbe Logik wie Spell::EffectDispel() sie fuer echte Spieler-Dispels nutzt), anhand der
+    // DispelMask des Dispel-Spells selbst (SpellInfo::Dispel-Feld, z.B. "Dispel Magic" -> Magic).
+    if (rotation->ResolvedDispelSpellId && healTarget && bot->HasSpell(rotation->ResolvedDispelSpellId))
+    {
+        if (SpellInfo const* dispelInfo = sSpellMgr->GetSpellInfo(rotation->ResolvedDispelSpellId))
+        {
+            if (bot->GetSpellHistory()->IsReady(dispelInfo)
+                && bot->GetDistance(healTarget) <= dispelInfo->GetMaxRange(false, bot)
+                && bot->IsWithinLOSInMap(healTarget))
+            {
+                DispelChargesList dispelList;
+                healTarget->GetDispellableAuraList(bot, dispelInfo->GetDispelMask(), dispelList);
+                if (!dispelList.empty())
+                {
+                    if (bot->CastSpell(healTarget, rotation->ResolvedDispelSpellId, TRIGGERED_NONE))
+                    {
+                        TC_LOG_DEBUG("scripts.bots", "BotMgr::ProcessBotMechanicReactions: Bot %s "
+                            "dispelt %s (Dispel-Spell %u).", bot->GetGUID().ToString().c_str(),
+                            healTarget->GetGUID().ToString().c_str(), rotation->ResolvedDispelSpellId);
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
 }
 
 // Gemeinsamer Hilfscode fuer BotAcceptQuest()/BotTurnInQuest(): loest questGiverSpawnGuid (DB-Spawn-Id
@@ -3634,6 +3831,67 @@ bool BotMgr::IsDungeonClearModeActive(uint32 accountId) const
 {
     auto itr = _botSessions.find(accountId);
     return itr != _botSessions.end() && itr->second.DungeonClearActive;
+}
+
+uint32 BotMgr::GetBotAccountIdByGuid(ObjectGuid guid) const
+{
+    // Siehe BotMgr.h-Kommentar - derselbe lineare Scan/dieselbe Groessenordnung wie IsBotPlayerGuid().
+    for (auto const& [accountId, entry] : _botSessions)
+    {
+        if (entry.Session && entry.Session->GetPlayer() && entry.Session->GetPlayer()->GetGUID() == guid)
+            return accountId;
+    }
+    return 0;
+}
+
+uint32 BotMgr::SetDungeonClearModeForPlayerGroup(Player* requester, bool enable)
+{
+    if (!requester)
+        return 0;
+
+    Group* group = requester->GetGroup();
+    if (!group)
+        return 0;
+
+    uint32 toggledCount = 0;
+    for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+    {
+        Player* member = itr->GetSource();
+        if (!member || !IsBotPlayerGuid(member->GetGUID()))
+            continue;
+
+        uint32 accountId = GetBotAccountIdByGuid(member->GetGUID());
+        if (accountId && SetDungeonClearMode(accountId, enable))
+            ++toggledCount;
+    }
+
+    TC_LOG_INFO("scripts.bots", "BotMgr::SetDungeonClearModeForPlayerGroup: Spieler %s hat den Dungeon-Clear-"
+        "Modus fuer %u Bot(s) der eigenen Gruppe %s.", requester->GetName().c_str(), toggledCount,
+        enable ? "AKTIVIERT" : "deaktiviert");
+    return toggledCount;
+}
+
+uint32 BotMgr::CountActiveDungeonClearBotsInGroup(Player* player) const
+{
+    if (!player)
+        return 0;
+
+    Group* group = player->GetGroup();
+    if (!group)
+        return 0;
+
+    uint32 activeCount = 0;
+    for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+    {
+        Player* member = itr->GetSource();
+        if (!member || !IsBotPlayerGuid(member->GetGUID()))
+            continue;
+
+        uint32 accountId = GetBotAccountIdByGuid(member->GetGUID());
+        if (accountId && IsDungeonClearModeActive(accountId))
+            ++activeCount;
+    }
+    return activeCount;
 }
 
 void BotMgr::ProcessDungeonClear(uint32 accountId, uint32 diff)

@@ -264,10 +264,15 @@ eine eigenstaendige Neuentwicklung gegen unsere eigenen Core-APIs:
   zuverlaessiger als `CreatureTemplate::rank`, keine Dungeon-spezifischen Daten unsererseits noetig), engagiert
   Trash automatisch ueber die
   bereits bestehende `SelectBotCombatTarget()`-Mit-Kampf-Logik und loest nach jedem Kill automatisch
-  `BotLootTarget()` aus. Bewusst NICHT uebernommen (zu grosser Umfang fuer eine erste Runde, braucht
-  Dungeon-spezifische Skript-Kenntnis, die wir fuer Legion-Instanzen nicht recherchiert haben): Boss-Mechanik-
-  Ausweichen, Pull-Stile (Leeroy/Advanced/Dynamic), Encounter-Skripte (Hebel/Altare/Eskorten), Heiler-
-  Positionierung, Tod-Wiederbelebungs-Choreographie.
+  `BotLootTarget()` aus. **Zusaetzlich umgesetzt** (Runde 6, `BotMgr::ProcessBotMechanicReactions()`): eine
+  GENERISCHE (nicht Boss-spezifische) Mechanik-Reaktionsebene, die JEDEM Encounter gemeinsam ist - gefaehrliche
+  Bodeneffekte werden verlassen (`DynamicObject::GetSpellInfo()->IsPositive()==false` + Bot steht innerhalb
+  `GetRadius()`), Skillungen mit Interrupt (siehe `g_BotSpecRotations`) unterbrechen automatisch castende
+  Gegner, Skillungen mit Dispel entfernen automatisch entfernbare Debuffs (beides preemptiert die normale
+  Rotation fuer den aktuellen Tick). Weiterhin bewusst NICHT uebernommen (braucht eine Boss-genaue
+  Wissensbasis pro Encounter, die fuer Legion-Dungeons nicht recherchiert wurde): Boss-spezifisches
+  Ausweich-Positionswissen, Soak-Mechaniken, Pull-Stile (Leeroy/Advanced/Dynamic), Encounter-Skripte (Hebel/
+  Altare/Eskorten), Heiler-Positionierung, Tod-Wiederbelebungs-Choreographie.
 - **[mod-ah-bot-plus](https://github.com/NathanHandley/mod-ah-bot-plus)** (Referenz fuer: Auktionshaus-Bot) -
   **Recherche-Ergebnis: braucht keine Neuentwicklung.** Dieser TrinityCore-Fork bringt unter
   `src/server/game/AuctionHouseBot/` (`AuctionHouseBot.*`, `AuctionHouseBotSeller.*`,
@@ -295,8 +300,25 @@ eine eigenstaendige Neuentwicklung gegen unsere eigenen Core-APIs:
   (siehe `OllamaChatMgr.h`-Kopfkommentar fuer das volle Thread-Sicherheits-Modell) - blockiert also NICHT
   den World-Update-Thread. Dokumentierte Einschraenkungen: kein TLS, kein Chunked-Transfer-Encoding, kein
   explizites Timeout, keine Konversations-Historie/Persoenlichkeits-Profile wie im Referenzmodul.
+- **[mod-dungeon-clear-addon](https://github.com/jrad7/mod-dungeon-clear-addon)** (Referenz fuer: Client-Addon
+  zur Steuerung des Dungeon-Clear-Modus) - **umgesetzt** unter `tools/addons/AshDC_DungeonClear/` (Runde 6).
+  Referenzmodul ist ein WotLK-3.3.5-Lua-Addon (`## Interface: 30300`, AGPL-3.0) - Struktur/Funktionsweise von
+  WoW-Addons hat sich seit WotLK nicht grundlegend geaendert (Slash-Befehle, `CHAT_MSG_*`-Events, Addon-
+  Nachrichtenkanal), trotzdem komplett neu fuer Client-Build 26972 (Legion 7.3.5, `## Interface: 70300`)
+  geschrieben und strikt auf das beschraenkt, was `bot_dungeonclear_control.cpp` (neu, Runde 6) serverseitig
+  tatsaechlich anbietet: zwei gleichwertige Steuerwege - ein Party-/Raid-Chat-Schluesselwort (`!dc on/off/
+  status`, `PlayerScript::OnChat()`-Group-Ueberladung, braucht KEINEN Addon-Kanal) und eine an einen
+  bestimmten Bot gerichtete Addon-Whisper-Nachricht (`SendAddonMessage(prefix, "ASHDC:CMD:...", "WHISPER",
+  <BotName>)`). Wichtige, per Recherche bestaetigte Einschraenkung: `PlayerScript::OnChat()` bekommt bei einer
+  Addon-Nachricht nur Text + `lang==LANG_ADDON`, NICHT den eigentlichen Addon-Prefix (`Player::WhisperAddon()`
+  reicht ihn nicht an `sScriptMgr->OnPlayerChat()` durch) - geloest, indem die Server-Antwort als normale
+  sichtbare System-/Whisper-Nachricht mit festem Text-Praefix `"[AshDC]"` zurueckkommt, die das Addon per
+  eigenem `CHAT_MSG_SYSTEM`/`CHAT_MSG_WHISPER`-Hook erkennt und in einem kleinen Status-Fenster anzeigt -
+  kein echtes `CHAT_MSG_ADDON`-Client-Event noetig. Bewusst NICHT uebernommen: Boss-Mechanik-Datenbank/
+  Ausweich-UI, Pull-Stil-Auswahl, Konfigurations-Fenster/SavedVariables (passend zum aktuellen Server-
+  Funktionsumfang, siehe oben).
 
-Umsetzungsstand dieser drei Punkte: siehe Commit-Historie/PRs nach diesem README-Stand - wird hier bewusst nicht
+Umsetzungsstand dieser Punkte: siehe Commit-Historie/PRs nach diesem README-Stand - wird hier bewusst nicht
 laufend nachgepflegt, um Drift zwischen Code und Dokumentation zu vermeiden; der PR-Text der jeweiligen
 Implementierungsrunde ist die verbindliche Quelle fuer den genauen Umfang/die Annahmen.
 
