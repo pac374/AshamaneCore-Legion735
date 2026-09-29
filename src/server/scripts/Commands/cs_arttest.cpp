@@ -1403,8 +1403,11 @@ public:
     // Traits that only fire with a chance are cast several times so that the counter can grow at all
     static uint32 const GenCastRepeats = 25;
 
-    // A projectile or a channel only reaches the script a moment after the cast, those candidates are read later
-    static uint32 const GenDelayMs = 2000;
+    // A projectile or a channel only reaches the script a moment after the cast, those candidates are read later.
+    // constexpr (not just const): C++17 makes a static constexpr data member implicitly inline, so it always has a
+    // definition even where it's ODR-used (e.g. passed to a variadic/forwarding logging call) - a plain "static
+    // uint32 const" here linked only by luck depending on how such call sites happened to pass it.
+    static constexpr uint32 GenDelayMs = 2000;
 
     // One test character has to be able to cast the abilities of every class, so on top of the usual triggered
     // flags the equipped item requirement (weapon/shield class of the ability) and the DBC target checks are
