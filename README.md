@@ -265,6 +265,40 @@ Commands.md, Abschnitt "Modul OllamaChat", fuer die dokumentierte Abgrenzung). G
 systematische Durchsicht aller `PlayerScript`-Hook-Ueberladungen ueber alle Custom-Module hinweg, nicht
 durch einen Livetest - noch nicht gegen einen laufenden Server verifiziert (siehe Test-Checkliste im PR).
 
+**Runde 7: erster echter Build + Livetest (MSVC, fremde Session) - zwei Compile-Fehler und ein
+Korrektheits-Fund in der Kampf-KI.** Zum ersten Mal seit Beginn dieses Playerbots-Moduls wurde der Code
+tatsaechlich kompiliert (in dieser Entwicklungsumgebung ist dafuer kein Toolchain vorhanden) und live
+gegen einen laufenden Server getestet:
+- Zwei MSVC-Compile-Fehler (Include-Pfad `BotMgr.h` aus `Custom/OllamaChat/` heraus, mehrdeutiger Name
+  `LfgQueueRoleCount` durch eine widerspruechliche globale Vorwaertsdeklaration in `LFGMgr.h` kombiniert
+  mit `using namespace lfg;`) - beide gefixt, Build lief danach durch (Exit 0).
+- **Wichtigster Fund**: `.bottest diagspells` (siehe Abschnitt d)) deckte auf, dass `ResolveSpellIdByName()`
+  bei mehreren exakten Namenstreffern (Spell.db2 enthaelt fuer die meisten Grundfaehigkeiten weiterhin die
+  alten Rang-Duplikate aus Classic bis Cata, z.B. Frostbolt/Judgment/Healing Wave/Execute/Shield Slam) den
+  ERSTEN Treffer nach aufsteigender Id waehlte - das ist bei praktisch allen betroffenen Faehigkeiten die
+  NIEDRIGSTE/AELTESTE Version, nicht die aktuelle Legion-Fassung. Betraf ~135 von ~250 eindeutigen
+  Faehigkeitsnamen ueber alle 36 Rotationen. Fix: bei mehreren Treffern wird jetzt die HOECHSTE Spell-Id
+  verwendet (Blizzard fuegt bei einer Faehigkeits-Ueberarbeitung neue DB2-Eintraege hinzu, alte Rang-
+  Eintraege behalten ihre urspruengliche niedrige Id dauerhaft). Zusaetzlich loesten 6 tatsaechlich
+  existierende 7.3.5-Namen (`Disrupt`, `Clearcasting`, `Heating Up`, `Barbed Shot`, `Wildfire Bomb`,
+  `Demonic Core`) trotzdem NICHT auf: `ResolveSpellIdByName()` hat jetzt einen klassenuebergreifenden
+  Fallback (nur bei GENAU EINEM Treffer uebernommen, sonst weiterhin "nicht gefunden"), der die meisten
+  davon abdeckt; `Barbed Shot` (Hunter Beast Mastery) war dagegen schlicht eine BfA-Faehigkeit, die es in
+  Legion 7.3.5 noch nicht gab - ersatzlos aus der Rotation entfernt statt geraten. `Wildfire Bomb` (Hunter
+  Survival) bleibt ein offener, dokumentierter Pruefpunkt (siehe Kommentar bei specId 255 in `BotMgr.cpp`).
+- Zusaetzlich (Verdachtsmoment, nicht abschliessend zugeordnet): ein anhaltender Paket-Strom
+  (`SMSG_ATTACKER_STATE_UPDATE`/`SMSG_THREAT_UPDATE`) bei einem frisch erstellten, alleinstehenden Bot am
+  Standard-Spawnpunkt. Per Code-Review AUSGESCHLOSSEN als Ursache: `ProcessBotMechanicReactions()` (das
+  neue Boss-Mechanik-System aus Runde 6) wird in `ProcessBotCombatAI()` erst NACH einem fruehen
+  "kein Kampf-/Heilziel vorhanden"-Abbruch aufgerufen - fuer einen gruppenlosen, vollstaendig gesunden Bot
+  ohne Ziel wird die Funktion nachweislich nie erreicht. Wahrscheinlicher: normale Sichtbarkeits-Pakete
+  eines echten, unabhaengigen Kampfgeschehens am selben Spawnpunkt (ein zweiter, aelterer Testaccount stand
+  laut Bericht zufaellig an derselben Stelle). Trotzdem zusaetzlich gehaertet: das Ausweichen vor
+  Bodeneffekten in `ProcessBotMechanicReactions()` gibt jetzt keinen neuen `MovePoint()`-Befehl mehr an
+  den MotionMaster, solange eine vorherige Ausweichbewegung noch laeuft (`POINT_MOTION_TYPE`-Check) - vermeidet
+  unnoetig wiederholte Bewegungspakete bei vielen gleichzeitig betroffenen Bots, unabhaengig davon, ob das
+  hier tatsaechlich die Ursache war.
+
 ### e) Roadmap - naechste Bausteine (inspiriert von, aber NEU gebaut gegenueber 3.3.5-Community-Modulen)
 
 Drei Community-Module aus dem WotLK-3.3.5-Oekosystem (AzerothCore) dienen als **Ideen-/Zielreferenz** fuer die

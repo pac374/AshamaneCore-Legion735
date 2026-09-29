@@ -2943,14 +2943,16 @@ namespace
             nullptr, "Detox"
         },
         // --- Hunter Beast Mastery (specId 253) - Fernkampf-DPS --- MITTEL-HOCH auf Kill-Command/
-        // Barbed-Shot/Bestial-Wrath-Kernschleife. Frenzy-Stack-Pflege auf dem PET (nicht dem Bot
-        // selbst) nicht modelliert - AuraPresentOnSelf/AuraMissingOnSelf koennen nur Bot-eigene Auren
-        // pruefen, keine Pet-Auren (Framework-Grenze, dokumentiert).
+        // Bestial-Wrath-Kernschleife, Cobra Shot als Fokus-Fuellschlag. KORREKTUR (Livetest-Fund Runde
+        // 7, '.bottest diagspells' meldete "Barbed Shot" als in diesem Build nicht auffindbar): "Barbed
+        // Shot" ist eine Battle-for-Azeroth-Faehigkeit (Patch 8.0), existiert in Legion 7.3.5 schlicht
+        // noch nicht - die urspruengliche Recherche hatte hier faelschlich eine spaetere Patch-Version
+        // uebernommen (genau der Fehler, den die "nur 7.3.5-verifizierte Namen"-Regel verhindern soll).
+        // Ersatzlos entfernt statt durch eine geratene 7.3.5-Alternative ersetzt.
         {
             253, SPELLFAMILY_HUNTER, BotRole::RangedDps,
             {
                 { "Kill Command", BotRotationCondition::Always },
-                { "Barbed Shot",  BotRotationCondition::Always },
                 { "Bestial Wrath", BotRotationCondition::Always },
                 { "Cobra Shot",   BotRotationCondition::Always }
             },
@@ -2973,6 +2975,14 @@ namespace
         // jedem anderen Patch (Classic-BfA-Fernkampf bzw. Shadowlands+-Rework). Mongoose-Bite-Stack-
         // Fenster (mehrfach hintereinander casten waehrend Mongoose-Fury aktiv ist) nicht modelliert -
         // Raptor Strike als sichererer, stack-unabhaengiger Standard-Finisher gewaehlt.
+        // OFFENER LIVETEST-FUND (Runde 7): '.bottest diagspells' meldete "Wildfire Bomb" als in diesem
+        // Build nicht aufloesbar (weder unter SPELLFAMILY_HUNTER noch ueber den neuen klassenuebergreifenden
+        // Fallback in ResolveSpellIdByName()). Anders als bei "Barbed Shot" (Hunter BM, oben) ist NICHT
+        // sicher genug bekannt, ob "Wildfire Bomb" in 7.3.5 schlicht noch nicht existiert (wie Barbed
+        // Shot) oder nur anders benannt ist - deshalb bewusst NICHT geraten/ersetzt. Vor Live-Einsatz mit
+        // '.lookup spell wildfire' bzw. '.lookup spell bomb' pruefen und diese Zeile entsprechend
+        // korrigieren; bis dahin bleibt der Schritt inaktiv, der Rest der Rotation (Raptor Strike/Serpent
+        // Sting) funktioniert unveraendert weiter.
         {
             255, SPELLFAMILY_HUNTER, BotRole::MeleeDps,
             {
@@ -3121,6 +3131,41 @@ namespace
     };
 }
 
+namespace
+{
+    // Ein einzelner Scan-Durchlauf ueber sSpellMgr, optional auf eine SpellFamilyName gefiltert (siehe
+    // BotMgr::ResolveSpellIdByName() unten fuer die beiden Aufrufer dieser Funktion: der gefilterte
+    // Haupt-Durchlauf und der ungefilterte Fallback-Durchlauf). Unter mehreren exakten Namenstreffern
+    // wird die HOECHSTE Spell-Id zurueckgegeben (siehe Kommentar im Aufrufer fuer die Begruendung -
+    // Livetest-Fund Runde 7: alte Rang-Duplikate aus Classic-Cata haben durchgehend NIEDRIGERE Ids als
+    // die aktuelle 7.3.5-Version derselben Faehigkeit).
+    uint32 ScanSpellDb2ByName(std::wstring const& wantedLower, int64 spellFamilyFilter, uint32& outMatchCount)
+    {
+        uint32 found = 0;
+        outMatchCount = 0;
+        for (uint32 id = 0; id < sSpellMgr->GetSpellInfoStoreSize(); ++id)
+        {
+            SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(id);
+            if (!spellInfo)
+                continue;
+            if (spellFamilyFilter >= 0 && int64(spellInfo->SpellFamilyName) != spellFamilyFilter)
+                continue;
+            if (!spellInfo->SpellName || !spellInfo->SpellName->Str[LOCALE_enUS])
+                continue;
+
+            std::wstring candidate;
+            Utf8toWStr(spellInfo->SpellName->Str[LOCALE_enUS], candidate);
+            wstrToLower(candidate);
+            if (candidate == wantedLower)
+            {
+                found = id;
+                ++outMatchCount;
+            }
+        }
+        return found;
+    }
+}
+
 uint32 BotMgr::ResolveSpellIdByName(std::string const& englishName, uint32 spellFamily) const
 {
     // Siehe voller Begruendung im BotMgr.h-Kopfkommentar ("Kampf-KI") und bei g_BotSpecRotations
@@ -3128,7 +3173,7 @@ uint32 BotMgr::ResolveSpellIdByName(std::string const& englishName, uint32 spell
     // Web-Recherche zu uebernehmen. Stattdessen wird hier - nach demselben Muster wie das bereits
     // existierende GM-Kommando '.lookup spell' (cs_lookup.cpp) - das TATSAECHLICH auf diesem Server
     // geladene Spell.db2 (Build 26972) nach einem EXAKTEN, gross-/kleinschreibungsunabhaengigen
-    // Namens-Treffer durchsucht, zusaetzlich auf spellFamily gefiltert (verhindert Kollisionen mit
+    // Namens-Treffer durchsucht, zuerst auf spellFamily gefiltert (verhindert Kollisionen mit
     // gleichnamigen Faehigkeiten anderer Klassen). Ergebnis ist dadurch garantiert korrekt fuer GENAU
     // diese Server-Version, unabhaengig davon, ob die urspruengliche Recherchequelle fuer eine andere
     // Buildnummer eine andere ID hatte.
@@ -3142,43 +3187,60 @@ uint32 BotMgr::ResolveSpellIdByName(std::string const& englishName, uint32 spell
     Utf8toWStr(englishName, wanted);
     wstrToLower(wanted);
 
-    uint32 found = 0;
     uint32 matchCount = 0;
-    for (uint32 id = 0; id < sSpellMgr->GetSpellInfoStoreSize(); ++id)
-    {
-        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(id);
-        if (!spellInfo || spellInfo->SpellFamilyName != spellFamily)
-            continue;
-        if (!spellInfo->SpellName || !spellInfo->SpellName->Str[LOCALE_enUS])
-            continue;
+    uint32 found = ScanSpellDb2ByName(wanted, int64(spellFamily), matchCount);
 
-        std::wstring candidate;
-        Utf8toWStr(spellInfo->SpellName->Str[LOCALE_enUS], candidate);
-        wstrToLower(candidate);
-        if (candidate == wanted)
+    // Livetest-Fund (Runde 7, siehe README-Commands.md/PR): Spell.db2 enthaelt fuer die meisten
+    // Grundfaehigkeiten mehrere exakte Namenstreffer - die alten Rang-Duplikate aus Classic bis Cata
+    // (z.B. "Frostbolt" existiert als Rank-1-Vanilla-Spell UND als aktuelle Legion-Version, gleicher
+    // Name, gleiche SpellFamilyName). Der urspruengliche "ersten Treffer nehmen"-Ansatz waehlte dadurch
+    // fast immer die NIEDRIGSTE/AELTESTE Id (Ids steigen historisch mit dem Einfuehrungspatch) statt
+    // der aktuellen 7.3.5-Version - ScanSpellDb2ByName() liefert stattdessen die HOECHSTE der
+    // gefundenen Ids (Blizzard fuegt bei einer Faehigkeits-Ueberarbeitung ueber Xpacs hinweg neue
+    // Spell.db2-Eintraege hinzu, alte Rang-Eintraege behalten dauerhaft ihre urspruengliche niedrige
+    // Id) - kein Ersatz fuer eine echte Verifikation (siehe '.bottest diagspells'/'.lookup spell'),
+    // aber eine deutlich zuverlaessigere Standardannahme als "erster Treffer".
+
+    if (matchCount == 0)
+    {
+        // Zweiter Livetest-Fund (Runde 7): einzelne, tatsaechlich existierende 7.3.5-Faehigkeiten/Auren
+        // (u.a. Demon Hunters "Disrupt", Mage "Clearcasting"/"Heating Up", Warlock "Demonic Core")
+        // loesten trotz korrektem Namen NICHT auf, vermutlich weil ihr SpellFamilyName-Feld in diesem
+        // DB2-Build von der fuer die jeweilige Klasse erwarteten SpellFamilyNames-Konstante abweicht
+        // (z.B. als SPELLFAMILY_GENERIC statt der Klassenfamilie klassifiziert). Fallback: wird beim
+        // gefilterten Durchlauf NICHTS gefunden, wird ungefiltert (ueber ALLE Klassen) erneut gesucht -
+        // GENAU EIN Treffer wird trotzdem uebernommen (Kollisionsschutz bleibt bestehen: liefert der
+        // Fallback mehrere Treffer ueber verschiedene Klassen, ist der Name zu mehrdeutig fuer eine
+        // automatische Entscheidung und es bleibt bei "nicht gefunden").
+        uint32 fallbackMatchCount = 0;
+        uint32 fallbackFound = ScanSpellDb2ByName(wanted, -1, fallbackMatchCount);
+        if (fallbackMatchCount == 1)
         {
-            if (matchCount == 0)
-                found = id;
-            ++matchCount;
+            found = fallbackFound;
+            matchCount = 1;
+            TC_LOG_INFO("scripts.bots", "BotMgr::ResolveSpellIdByName: '%s' wurde NICHT unter "
+                "SpellFamilyName %u gefunden, aber eindeutig (1 Treffer) ueber alle Klassen hinweg - "
+                "verwende Spell-Id %u (tatsaechliche SpellFamilyName pruefen, falls das ueberrascht).",
+                englishName.c_str(), spellFamily, found);
         }
     }
 
     if (matchCount == 0)
     {
         TC_LOG_ERROR("scripts.bots", "BotMgr::ResolveSpellIdByName: '%s' (SpellFamilyName %u) wurde in diesem "
-            "Server-Spell.db2 NICHT gefunden - der zugehoerige Rotationsschritt bleibt dauerhaft inaktiv "
-            "(kein Absturz). Moegliche Ursachen: Schreibweise weicht vom recherchierten 7.3.5-Namen ab, oder "
-            "diese Faehigkeit heisst in Build 26972 anders (z.B. Talent-Umbenennung) - mit '.lookup spell "
-            "%s' pruefen.", englishName.c_str(), spellFamily, englishName.c_str());
+            "Server-Spell.db2 NICHT gefunden (auch nicht klassenuebergreifend) - der zugehoerige "
+            "Rotationsschritt bleibt dauerhaft inaktiv (kein Absturz). Moegliche Ursachen: Schreibweise "
+            "weicht vom recherchierten 7.3.5-Namen ab, oder diese Faehigkeit heisst in Build 26972 anders "
+            "(z.B. Talent-Umbenennung), oder sie existiert in diesem Patch schlicht noch nicht (spaeterer "
+            "Xpac) - mit '.lookup spell %s' pruefen.", englishName.c_str(), spellFamily, englishName.c_str());
     }
     else if (matchCount > 1)
     {
         TC_LOG_ERROR("scripts.bots", "BotMgr::ResolveSpellIdByName: '%s' (SpellFamilyName %u) ist MEHRDEUTIG "
-            "(%u exakte Treffer in Spell.db2) - verwende Spell-Id %u (erster Treffer), das sollte manuell per "
-            "'.lookup spell %s' verifiziert werden.", englishName.c_str(), spellFamily, matchCount, found,
-            englishName.c_str());
+            "(%u exakte Treffer in Spell.db2, vermutlich alte Rang-Duplikate) - verwende Spell-Id %u "
+            "(HOECHSTE der gefundenen Ids), das sollte manuell per '.lookup spell %s' verifiziert werden.",
+            englishName.c_str(), spellFamily, matchCount, found, englishName.c_str());
     }
-
     resolveCache[cacheKey] = found;
     return found;
 }
@@ -3475,19 +3537,31 @@ bool BotMgr::ProcessBotMechanicReactions(Player* bot, BotSpecRotation const* rot
     // (der Bot steht ja bereits im/nahe am Effekt, wenn dieser ueberhaupt relevant wird).
     if (DynamicObject* harmfulEffect = FindHarmfulGroundEffectUnderBot(bot, 15.0f))
     {
-        float fleeX, fleeY, fleeZ;
-        // Radial vom Effektzentrum weg, ueber den Wirkradius hinaus (plus Sicherheitsabstand) -
-        // MovePoint(generatePath=true) uebernimmt die eigentliche Navmesh-Route dorthin, damit der Bot
-        // nicht durch Waende/von Klippen "flieht".
-        float angle = harmfulEffect->GetAngle(bot);
-        float distance = harmfulEffect->GetRadius() + 5.0f;
-        fleeX = harmfulEffect->GetPositionX() + std::cos(angle) * distance;
-        fleeY = harmfulEffect->GetPositionY() + std::sin(angle) * distance;
-        fleeZ = harmfulEffect->GetPositionZ();
-        bot->GetMotionMaster()->MovePoint(0, fleeX, fleeY, fleeZ, true);
+        // Skalierungs-Haertung (Livetest-Fund Runde 7, siehe README-Commands.md/PR - "500+ gleichzeitige
+        // Bots"-Bedenken): ProcessBotMechanicReactions() wird bei aktivem Bodeneffekt JEDEN Kampf-KI-Tick
+        // (alle ~400ms) erneut aufgerufen, solange der Bot noch innerhalb des Suchradius steht - das
+        // navmesh-basierte Herauslaufen dauert aber typischerweise laenger als 400ms. Ohne diese Sperre
+        // wuerde MovePoint() bei jedem Tick erneut ausgeloest (jeweils ein neues SMSG_ON_MONSTER_MOVE),
+        // obwohl der Bot bereits unterwegs ist - unnoetiger Paket-Overhead, der sich bei vielen
+        // gleichzeitig betroffenen Bots summiert. POINT_MOTION_TYPE ist bereits aktiv, waehrend eine
+        // vorherige Ausweichbewegung noch laeuft - dann hier nichts erneut auf den Weg schicken, aber
+        // (Sicherheit vor Sparsamkeit) trotzdem "true" liefern, damit die normale Rotation fuer diesen
+        // Tick weiterhin pausiert, bis der Bot den Effekt tatsaechlich verlassen hat.
+        if (bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+        {
+            // Radial vom Effektzentrum weg, ueber den Wirkradius hinaus (plus Sicherheitsabstand) -
+            // MovePoint(generatePath=true) uebernimmt die eigentliche Navmesh-Route dorthin, damit der
+            // Bot nicht durch Waende/von Klippen "flieht".
+            float angle = harmfulEffect->GetAngle(bot);
+            float distance = harmfulEffect->GetRadius() + 5.0f;
+            float fleeX = harmfulEffect->GetPositionX() + std::cos(angle) * distance;
+            float fleeY = harmfulEffect->GetPositionY() + std::sin(angle) * distance;
+            float fleeZ = harmfulEffect->GetPositionZ();
+            bot->GetMotionMaster()->MovePoint(0, fleeX, fleeY, fleeZ, true);
 
-        TC_LOG_DEBUG("scripts.bots", "BotMgr::ProcessBotMechanicReactions: Bot %s weicht Bodeneffekt "
-            "(Spell %u) aus.", bot->GetGUID().ToString().c_str(), harmfulEffect->GetSpellId());
+            TC_LOG_DEBUG("scripts.bots", "BotMgr::ProcessBotMechanicReactions: Bot %s weicht Bodeneffekt "
+                "(Spell %u) aus.", bot->GetGUID().ToString().c_str(), harmfulEffect->GetSpellId());
+        }
         return true;
     }
 
