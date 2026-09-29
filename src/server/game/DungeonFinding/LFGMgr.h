@@ -467,6 +467,29 @@ class TC_GAME_API LFGMgr
         LFGDungeonData const* GetPlayerLFGDungeon(ObjectGuid guid);
         LFGDungeonsEntry const* GetPlayerLFGDungeonEntry(ObjectGuid guid);
 
+        // --- Gruppe Stufe 2, Teil A (LFG-Pool-Matchmaking fuer Bots, siehe BotMgr::TriggerLfgPoolFillOnce()
+        // und BotMgr::ProcessLfgPoolFillTick() in src/server/scripts/Custom/Bots/BotMgr.cpp) ------------------
+        //
+        // Zwei rein lesende, additive Erweiterungen der bereits oeffentlichen LFGMgr-API - beide aendern
+        // keinerlei internen Zustand und keinen bestehenden Aufrufpfad (JoinLfg()/FindGroups()/
+        // MakeNewGroup() bleiben unveraendert). Ein Bot nimmt dadurch exakt denselben, bereits
+        // bestaetigten Matching-Pfad wie ein echter Solo-Spieler - kein separater Bot-Direktpfad.
+
+        /// Rein lesender Zugriff auf die Queue-Container einer Team-Seite (TEAM_ALLIANCE/TEAM_HORDE),
+        /// derselbe Container, den Update()/FindGroups() bereits durchlaufen. BotMgr liest daraus
+        /// ausschliesslich ueber LFGQueue::GetQueueDataStore() (siehe LFGQueue.h), um festzustellen, ob
+        /// und welche Rolle(n) fuer echte (Nicht-Bot-)Kandidaten gerade zu lange unbesetzt warten.
+        LfgQueueContainer const& GetQueuesForTeam(uint8 team) const { return QueuesStore[team]; }
+
+        /// Liefert die Proposal-Id, in der sich der gegebene Spieler/die gegebene Gruppe aktuell
+        /// befindet (0 falls keine aktive Proposal). Ein sockelloser Bot hat keinen Client, der
+        /// SMSG_LFG_PROPOSAL_UPDATE per CMSG_LFG_PROPOSAL_RESULT beantworten wuerde - BotMgr nutzt
+        /// diese Id, um stattdessen direkt UpdateProposal(id, guid, true) aufzurufen (dasselbe
+        /// Direktaufruf-Muster, das BotMgr bereits fuer Group::AddMember()/HandleMoveWorldportAck()
+        /// etc. nutzt). Rein lesend (lineare Suche ueber ProposalsStore, in der Praxis nur wenige
+        /// gleichzeitig aktive Eintraege), keine Mutation.
+        uint32 GetProposalId(ObjectGuid guid) const;
+
     private:
         uint8 GetTeam(ObjectGuid guid);
         void RestoreState(ObjectGuid guid, char const* debugMsg);

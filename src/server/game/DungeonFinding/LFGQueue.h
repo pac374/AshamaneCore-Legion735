@@ -131,6 +131,17 @@ class TC_GAME_API LFGQueue
         // Find new group
         uint8 FindGroups();
 
+        // --- Gruppe Stufe 2, Teil A (LFG-Pool-Matchmaking fuer Bots, siehe BotMgr::TriggerLfgPoolFillOnce())
+        //
+        // Rein lesender Zugriff auf die aktuell wartenden Kandidaten dieser Queue (Spieler- oder
+        // Gruppen-Guid -> Rollen/Dungeons/Beitrittszeit) - derselbe Container, den FindGroups()/
+        // CheckCompatibility() bereits intern nutzen. Gibt eine const-Referenz zurueck (keine Kopie,
+        // keine Mutation, kein neuer Aufrufpfad) - BotMgr braucht das, um ohne Duplizierung der
+        // Matching-Logik festzustellen, ob und welche Rolle(n) fuer echte (Nicht-Bot-)Kandidaten
+        // gerade zu lange unbesetzt warten, bevor probeweise ein Bot per LFGMgr::JoinLfg() als
+        // zusaetzlicher Solo-Kandidat in dieselbe Queue eingereiht wird.
+        LfgQueueDataContainer const& GetQueueDataStore() const { return QueueDataStore; }
+
         // Just for debugging purposes
         std::string DumpQueueInfo() const;
         std::string DumpCompatibleInfo(bool full = false) const;

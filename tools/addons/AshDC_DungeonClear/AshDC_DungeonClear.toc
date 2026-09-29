@@ -1,0 +1,9 @@
+## Interface: 70300
+## Title: AshDC - Dungeon Clear Control
+## Notes: Steuert den serverseitigen Bot-Dungeon-Clear-Modus (AshamaneCore Custom/Bots). Eigenstaendig neu
+## Notes: geschrieben fuer Client-Build 26972 (Legion 7.3.5) - siehe README.md Abschnitt e) fuer den vollen
+## Notes: Hintergrund (Ideenreferenz mod-dungeon-clear-addon, WotLK/AGPL-3.0, NICHT uebernommen).
+## Author: AshamaneCore
+## Version: 1.0
+
+AshDC_DungeonClear.lua

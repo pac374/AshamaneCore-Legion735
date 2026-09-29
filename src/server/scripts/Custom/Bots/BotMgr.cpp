@@ -42,8 +42,19 @@
 #include "DB2Stores.h"
 #include "DB2Structure.h"
 #include "ItemDefines.h"
+#include "LFGMgr.h"
+#include "SpellMgr.h"
+#include "SpellInfo.h"
+#include "SpellHistory.h"
+#include "Util.h"
+#include "QuestDef.h"
+#include "DynamicObject.h"
+#include "SpellAuras.h"
+#include "CellImpl.h"
+#include "GridNotifiersImpl.h"
 #include <cmath>
 #include <sstream>
+#include <iomanip>
 #include <vector>
 #include <unordered_set>
 #include <algorithm>
@@ -299,6 +310,14 @@ void BotMgr::Tick(uint32 diff)
         {
             entry.State = BotCharacterState::STATE_IN_WORLD;
 
+            // Kampf-KI (siehe BotMgr.h-Kopfkommentar "Kampf-KI"/ProcessBotCombatAI()): eigener
+            // ~400ms-Akkumulator, deshalb unbedenklich JEDEN Tick aufzurufen.
+            ProcessBotCombatAI(accountId, diff);
+
+            // Autonomer Dungeon-Clear-Modus (siehe SetDungeonClearMode()-Kommentar): eigener ~1s-
+            // Akkumulator, tut fuer die meisten Bots nichts (DungeonClearActive default false).
+            ProcessDungeonClear(accountId, diff);
+
             // --- Runde R (27.09.2026): reiner Idle-Diagnose-Platzhalter --------
             // Bewusst KEINE Movement-/MotionMaster-Logik (explizit Runde S
             // vorbehalten, siehe BotCharacter.h "Runde R"-Kommentar). Tut nichts
@@ -371,6 +390,11 @@ void BotMgr::Tick(uint32 diff)
             }
         }
     }
+
+    // Gruppe Stufe 2, Teil A: server-weiter Lazy-Nachfuell-Trigger (siehe BotMgr.h-Kopfkommentar bei
+    // ProcessLfgPoolFillTick()) - EINMAL pro BotMgr::Tick()-Aufruf, nicht pro Bot-Session (der Trigger
+    // prueft ueber alle Bots/Queues hinweg selbst, siehe dortige Implementierung).
+    ProcessLfgPoolFillTick(diff);
 }
 
 // --- Runde N (27.09.2026): Fix fuer den in Runde M gefundenen Shutdown-Absturz -
@@ -735,9 +759,24 @@ bool BotMgr::StartBotAttack(uint32 accountId, ObjectGuid::LowType targetGuid)
 
     bool attackOk = player->Attack(target, true);
 
+    // Bekannter, dokumentierter Nebenbug (README "Gruppe/LFR (Stufe 1)"): ohne einen expliziten
+    // MotionMaster::MoveChase()-Aufruf bleibt der Bot stehen, waehrend Attack() nur den Kampfzustand
+    // (UNIT_STATE_MELEE_ATTACKING/GetVictim()) setzt, aber KEINE Bewegung ansetzt - ein echter Client
+    // haelt die Melee-Reichweite durch eigenes Nachlaufen des Spielers, das hier fehlt. Bei einem
+    // stationaeren Ziel faellt das nicht auf (Bot steht ohnehin schon in Reichweite), bei einem
+    // beweglichen/Critter-Ziel (creature_template.type=8, CREATURE_TYPE_CRITTER, typischerweise mit
+    // RANDOM_MOTION_TYPE) laeuft das Ziel dem Bot ohne Fehlermeldung aus der Reichweite. Fix: denselben
+    // MotionMaster::MoveFollow()-Unterbau wie StartBotFollow() (Runde 137) nutzen, hier aber ueber
+    // MoveChase() (Combat-Aequivalent - haelt Waffenreichweite statt Follow-Abstand, bricht automatisch
+    // ab, sobald der Bot den Kampf verlaesst/AttackStop() aufgerufen wird). Nur bei erfolgreichem
+    // Attack()-Start ausgeloest, damit ein fehlgeschlagener Angriffsversuch keinen verwaisten
+    // Chase-Generator hinterlaesst.
+    if (attackOk)
+        player->GetMotionMaster()->MoveChase(target);
+
     TC_LOG_INFO("scripts.bots", "BotMgr::StartBotAttack: Account %u - Attack() Rueckgabe=%d, "
-        "HasUnitState(MELEE_ATTACKING)=%d, GetVictim() gesetzt=%d.", accountId, attackOk,
-        player->HasUnitState(UNIT_STATE_MELEE_ATTACKING), player->GetVictim() != nullptr);
+        "HasUnitState(MELEE_ATTACKING)=%d, GetVictim() gesetzt=%d, MoveChase() ausgeloest=%d.", accountId,
+        attackOk, player->HasUnitState(UNIT_STATE_MELEE_ATTACKING), player->GetVictim() != nullptr, attackOk);
 
     return attackOk;
 }
@@ -766,7 +805,14 @@ void BotMgr::StopBotAttack(uint32 accountId)
 
     player->AttackStop();
 
-    TC_LOG_INFO("scripts.bots", "BotMgr::StopBotAttack: Account %u - nach AttackStop(): "
+    // Gegenstueck zum MoveChase()-Fix in StartBotAttack(): ohne diesen Abbruch wuerde der zuvor
+    // angesetzte Chase-Generator (MOTION_SLOT_ACTIVE) den Bot weiter Richtung Ziel laufen lassen,
+    // obwohl der Kampf bereits per AttackStop() beendet wurde. Dieselbe Notbremsen-Konvention wie
+    // StopBotFollow() (Runde 137)/StopBotPatrol(): MoveIdle() setzt den aktiven Motion-Slot auf einen
+    // einfachen IdleMovementGenerator zurueck, Bot bleibt sofort an der aktuellen Position stehen.
+    player->GetMotionMaster()->MoveIdle();
+
+    TC_LOG_INFO("scripts.bots", "BotMgr::StopBotAttack: Account %u - nach AttackStop()+MoveIdle(): "
         "HasUnitState(MELEE_ATTACKING)=%d, GetVictim() gesetzt=%d.", accountId,
         player->HasUnitState(UNIT_STATE_MELEE_ATTACKING), player->GetVictim() != nullptr);
 }
@@ -2286,6 +2332,1810 @@ bool BotMgr::SkillBotArtifact(uint32 accountId, uint32 levelBudget)
         grantedRanks, budget, currentTier, artifact->GetTotalPurchasedArtifactPowers());
 
     return true;
+}
+
+namespace
+{
+    // Gruppe Stufe 2, Teil A: Tuning-Konstanten fuer den Lazy-Nachfuell-Trigger (siehe volle
+    // Begruendung im BotMgr.h-Kopfkommentar bei ProcessLfgPoolFillTick()/TriggerLfgPoolFillOnce()).
+    // Benannte Konstanten statt Magic Numbers, damit ein spaeterer Tuning-Durchgang (nach einem
+    // echten Live-Test mit realen Wartezeiten) keine Funktionssignaturen aendern muss.
+    constexpr uint32 LFG_POOL_FILL_INTERVAL_MS = 10000;            // alle 10s ein Nachfuell-Versuch
+    constexpr time_t LFG_POOL_FILL_WAIT_THRESHOLD_SECONDS = 30;    // "Warteschlange lange leer"
+    constexpr uint32 LFG_POOL_FILL_MAX_BOT_ATTEMPTS = 8;           // pro Fuellversuch max. Kandidaten testen
+}
+
+bool BotMgr::IsBotPlayerGuid(ObjectGuid guid) const
+{
+    // Siehe Begruendung im BotMgr.h-Kopfkommentar bei dieser Methode: _botSessions ist die einzige
+    // autoritative Quelle, kein Account-Id-Bereich/keine Heuristik. Linearer Scan (Bot-Anzahl laut
+    // Aufgabenstellung bis ~500) - unkritisch, da diese Methode nur aus dem alle ~10s laufenden
+    // Lazy-Nachfuell-Tick heraus in relevanter Zahl aufgerufen wird, nicht pro Weltserver-Frame.
+    for (auto const& [accountId, entry] : _botSessions)
+    {
+        if (entry.Session && entry.Session->GetPlayer() && entry.Session->GetPlayer()->GetGUID() == guid)
+            return true;
+    }
+    return false;
+}
+
+// Gruppe Stufe 2, Teil A: siehe voller Design-Kommentar im BotMgr.h-Kopfkommentar bei dieser Methode.
+bool BotMgr::TriggerLfgPoolFillOnce()
+{
+    using namespace lfg;
+
+    for (uint8 team = TEAM_ALLIANCE; team <= TEAM_HORDE; ++team)
+    {
+        LfgQueueContainer const& queues = sLFGMgr->GetQueuesForTeam(team);
+        for (auto const& [queueId, queue] : queues)
+        {
+            LfgQueueDataContainer const& queueData = queue.GetQueueDataStore();
+            for (auto const& [candidateGuid, data] : queueData)
+            {
+                // Nur Queue-Eintraege mit MINDESTENS EINEM echten (Nicht-Bot-)Mitglied sind fuer den
+                // Trigger relevant - ein reiner Bot-Kandidat (z.B. von uns selbst gerade erst
+                // eingereiht) braucht keinen weiteren Fueller.
+                bool hasRealMember = false;
+                uint8 presentRoles = 0;
+                for (auto const& [memberGuid, role] : data.roles)
+                {
+                    if (!IsBotPlayerGuid(memberGuid))
+                        hasRealMember = true;
+                    presentRoles |= role;
+                }
+
+                if (!hasRealMember)
+                    continue;
+
+                // Explizit qualifiziert (nicht nur "LfgQueueRoleCount"): LFGMgr.h deklariert im GLOBALEN
+                // Namespace zusaetzlich ein unabhaengiges, nie definiertes "struct LfgQueueRoleCount;"
+                // (Vorwaertsdeklaration, vermutlich fuer einen anderen/aelteren Zweck) - das echte, in
+                // LFGQueue.h definierte Struct liegt in namespace lfg. Mit der obigen "using namespace
+                // lfg;" sind beide Namen im selben effektiven Suchbereich sichtbar, was MSVC (C2872) als
+                // mehrdeutig ablehnt; die explizite Qualifikation entfernt die Mehrdeutigkeit eindeutig
+                // zugunsten des echten, vollstaendigen Typs.
+                lfg::LfgQueueRoleCount const roleCount = LFGMgr::GetRoleCountByQueueId(queueId);
+                bool missingTank = roleCount.minTanks > 0 && !(presentRoles & PLAYER_ROLE_TANK);
+                bool missingHealer = roleCount.minHealers > 0 && !(presentRoles & PLAYER_ROLE_HEALER);
+
+                time_t waited = time(nullptr) - data.joinTime;
+                if (waited < LFG_POOL_FILL_WAIT_THRESHOLD_SECONDS && !missingTank && !missingHealer)
+                    continue; // Auftragsvorgabe: "erst bei Bedarf", noch keine Notwendigkeit erkannt
+
+                uint8 desiredRole = missingTank ? PLAYER_ROLE_TANK : (missingHealer ? PLAYER_ROLE_HEALER : PLAYER_ROLE_DAMAGE);
+                LfgDungeonSet const dungeonsForBot = data.dungeons;
+
+                uint32 attempts = 0;
+                for (auto& [accountId, entry] : _botSessions)
+                {
+                    if (attempts >= LFG_POOL_FILL_MAX_BOT_ATTEMPTS)
+                        break;
+
+                    if (!entry.Session || entry.State != BotCharacterState::STATE_IN_WORLD)
+                        continue;
+                    if (_lfgFillerBotAccountIds.count(accountId))
+                        continue;
+
+                    Player* botPlayer = entry.Session->GetPlayer();
+                    if (!botPlayer || !botPlayer->IsInWorld() || botPlayer->GetGroup())
+                        continue;
+                    if (botPlayer->GetTeamId() != TeamId(team))
+                        continue;
+                    if (sLFGMgr->GetState(botPlayer->GetGUID()) != LFG_STATE_NONE)
+                        continue; // sollte bei korrektem _lfgFillerBotAccountIds-Tracking nicht vorkommen - Sicherheitsnetz
+
+                    ++attempts;
+
+                    // JoinLfg() nimmt eine nicht-const Referenz und mutiert/filtert die uebergebene
+                    // Dungeon-Menge (GetCompatibleDungeons()) - fuer jeden Kandidaten-Bot eine frische
+                    // Kopie uebergeben, damit ein fehlgeschlagener Versuch die Auswahl fuer den
+                    // naechsten Kandidaten nicht verfaelscht.
+                    LfgDungeonSet dungeonsCopy = dungeonsForBot;
+
+                    TC_LOG_INFO("scripts.bots", "BotMgr::TriggerLfgPoolFillOnce: Queue %u - echter Kandidat %s "
+                        "wartet %lld s (fehlende Pflichtrolle: Tank=%d Heiler=%d) - versuche Account %u ('%s') "
+                        "als Rolle %u einzureihen.", queueId, candidateGuid.ToString().c_str(), (long long)waited,
+                        missingTank, missingHealer, accountId, botPlayer->GetName().c_str(), uint32(desiredRole));
+
+                    sLFGMgr->JoinLfg(botPlayer, desiredRole, dungeonsCopy);
+
+                    if (sLFGMgr->GetState(botPlayer->GetGUID()) != LFG_STATE_NONE)
+                    {
+                        _lfgFillerBotAccountIds.insert(accountId);
+                        TC_LOG_INFO("scripts.bots", "BotMgr::TriggerLfgPoolFillOnce: Account %u erfolgreich in "
+                            "Queue %u eingereiht (LfgState=%u) - AdvanceLfgFillerBots() uebernimmt den weiteren "
+                            "Fortschritt (Proposal/Teleport).", accountId, queueId,
+                            uint32(sLFGMgr->GetState(botPlayer->GetGUID())));
+                        return true; // Auftragsvorgabe: hoechstens EIN Bot pro Aufruf/Tick, keine Dauerlast
+                    }
+
+                    TC_LOG_INFO("scripts.bots", "BotMgr::TriggerLfgPoolFillOnce: Account %u von JoinLfg() "
+                        "abgelehnt (Level-/Ilvl-/Lock-Check ueber GetCompatibleDungeons() nicht erfuellt fuer "
+                        "diese Dungeon-Auswahl) - naechster Kandidat.", accountId);
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+// Gruppe Stufe 2, Teil A: siehe voller Design-Kommentar im BotMgr.h-Kopfkommentar bei dieser Methode.
+void BotMgr::AdvanceLfgFillerBots()
+{
+    using namespace lfg;
+
+    if (_lfgFillerBotAccountIds.empty())
+        return;
+
+    std::vector<uint32> toErase;
+    for (uint32 accountId : _lfgFillerBotAccountIds)
+    {
+        auto itr = _botSessions.find(accountId);
+        if (itr == _botSessions.end() || !itr->second.Session)
+        {
+            toErase.push_back(accountId);
+            continue;
+        }
+
+        Player* botPlayer = itr->second.Session->GetPlayer();
+        if (!botPlayer || !botPlayer->IsInWorld())
+        {
+            toErase.push_back(accountId);
+            continue;
+        }
+
+        ObjectGuid guid = botPlayer->GetGUID();
+        LfgState state = sLFGMgr->GetState(guid);
+
+        if (state == LFG_STATE_PROPOSAL)
+        {
+            uint32 proposalId = sLFGMgr->GetProposalId(guid);
+            if (proposalId)
+            {
+                TC_LOG_INFO("scripts.bots", "BotMgr::AdvanceLfgFillerBots: Account %u - Proposal %u aktiv, kein "
+                    "Client vorhanden - rufe automatisch UpdateProposal(true) auf (ersetzt das ausbleibende "
+                    "CMSG_LFG_PROPOSAL_RESULT).", accountId, proposalId);
+                sLFGMgr->UpdateProposal(proposalId, guid, true);
+            }
+        }
+
+        // Egal ob durch den Aufruf direkt oben (letzte noch ausstehende Zusage - MakeNewGroup()/
+        // TeleportPlayer() laufen synchron INNERHALB von UpdateProposal(), siehe LFGMgr.cpp) oder durch
+        // einen spaeter zusagenden ECHTEN Mitspieler auf einem frueheren Tick bereits ausgeloest:
+        // derselbe HandleMoveWorldportAck()-Nachtrag wie TeleportBot() (Runde 93), falls der Bot gerade
+        // einen Kartenwechsel eingeleitet hat, den er ohne Client nie selbst per MSG_MOVE_WORLDPORT_ACK
+        // bestaetigen wuerde.
+        if (botPlayer->IsBeingTeleportedFar())
+        {
+            TC_LOG_INFO("scripts.bots", "BotMgr::AdvanceLfgFillerBots: Account %u - IsBeingTeleportedFar()=true "
+                "(LFG-Dungeon-Teleport), rufe manuell HandleMoveWorldportAck() auf.", accountId);
+            itr->second.Session->HandleMoveWorldportAck();
+        }
+
+        if (state == LFG_STATE_DUNGEON || state == LFG_STATE_FINISHED_DUNGEON)
+        {
+            TC_LOG_INFO("scripts.bots", "BotMgr::AdvanceLfgFillerBots: Account %u - Gruppe gefunden und Dungeon "
+                "betreten (LfgState=%u), Fueller-Auftrag erfuellt, Bot bleibt regulaeres Gruppenmitglied.",
+                accountId, uint32(state));
+            toErase.push_back(accountId);
+        }
+        else if (state == LFG_STATE_NONE)
+        {
+            TC_LOG_INFO("scripts.bots", "BotMgr::AdvanceLfgFillerBots: Account %u - ohne Match wieder aus der "
+                "LFG-Queue entfernt (Proposal abgelehnt oder Timeout) - Fueller-Slot freigegeben.", accountId);
+            toErase.push_back(accountId);
+        }
+        // LFG_STATE_QUEUED/ROLECHECK: weiter warten, Matching laeuft tick-gesteuert in
+        // LFGMgr::Update()->LFGQueue::FindGroups(), keine weitere Aktion hier noetig.
+    }
+
+    for (uint32 accountId : toErase)
+        _lfgFillerBotAccountIds.erase(accountId);
+}
+
+void BotMgr::ProcessLfgPoolFillTick(uint32 diff)
+{
+    // Fortschritt bereits aktiver Fueller-Bots JEDEN Tick pruefen (Proposal-Fenster ist mit
+    // LFG_TIME_PROPOSAL=45s knapp - hier zu selten nachzusehen wuerde Proposals unnoetig verfallen
+    // lassen), das eigentliche NEU-Einreihen dagegen nur alle LFG_POOL_FILL_INTERVAL_MS (siehe dort).
+    AdvanceLfgFillerBots();
+
+    _lfgFillTickAccumMs += diff;
+    if (_lfgFillTickAccumMs < LFG_POOL_FILL_INTERVAL_MS)
+        return;
+
+    _lfgFillTickAccumMs = 0;
+    TriggerLfgPoolFillOnce();
+}
+
+namespace
+{
+    // Kampf-KI: alle ~400ms statt jeden Weltserver-Tick (siehe BotSessionEntry::CombatAiTickAccumMs).
+    constexpr uint32 BOT_COMBAT_AI_TICK_MS = 400;
+    // Nahkampf-Engagement-Distanz fuer die automatische Mit-Kampf-Logik in SelectBotCombatTarget()
+    // (Tank/Nahkampf-DPS folgen/engagieren erst innerhalb dieser Distanz automatisch mit).
+    constexpr float BOT_MELEE_ENGAGE_RANGE = 30.0f;
+    // Heiler-Rolle betrachtet ein Gruppenmitglied erst ab dieser Lebens-Schwelle ueberhaupt als
+    // "braucht etwas" - verhindert sinnloses Dauerheilen bei vollem Leben.
+    constexpr float BOT_HEAL_CONSIDER_THRESHOLD_PCT = 90.0f;
+
+    // --- Kampf-KI: Pilot-Rotationstabellen, Patch 7.3.5 (Build 26972) -----------------------------
+    //
+    // QUELLENLAGE (siehe voller PR-Bericht fuer die vollstaendige Aufschluesselung je Skillung):
+    // Faehigkeiten-Namen, -Reihenfolge und -Bedingungen stammen aus einer gezielten Web-Recherche
+    // dieser Runde (Icy-Veins-/Wowhead-/guiaswow.com-abgeleitete 7.2/7.3.5-Guides, mehrfach
+    // gegengeprueft), AUSSCHLIESSLICH auf Patch 7.3.5 eingegrenzt (explizit NICHT BfA/Shadowlands/
+    // aktuelles Retail, da sich Faehigkeiten seither mehrfach grundlegend geaendert haben). Die
+    // Recherche selbst nennt je Skillung eine Konfidenzeinschaetzung ("hoch"/"mittel-hoch"/"mittel"/
+    // "niedrig") auf Namen/Reihenfolge - siehe Kommentar bei jedem einzelnen Tabelleneintrag unten.
+    // NUMERISCHE Spell-IDs waren dagegen in KEINER Quelle dieser
+    // Runde zuverlaessig zu bestaetigen (Netzwerkzugriff auf Wowhead/Icy-Veins/web.archive.org war in
+    // der Recherche-Sandbox blockiert) - deshalb enthaelt diese Tabelle bewusst KEINE IDs, sondern nur
+    // die recherchierten Namen; ResolveSpellIdByName() (siehe dort) loest sie beim ersten Gebrauch
+    // gegen das tatsaechlich auf DIESEM Server geladene Spell.db2 auf. Das ist die einzige Quelle, die
+    // fuer GENAU diesen Build (26972) garantiert korrekt ist - kein Raten, kein Uebernehmen einer
+    // moeglicherweise falschen/veralteten ID aus einer anderen Patch-Version.
+    //
+    // Runde 2 (diese Runde): von 4 auf 29 von 36 Skillungen erweitert - reine Dateneingabe nach
+    // demselben Framework, kein Code-Umbau noetig (siehe PR-Bericht). Bewusst NICHT aufgenommen, mit
+    // Begruendung (Mechanik passt nicht in das aktuelle Bedingungs-Vokabular Always/
+    // TargetHealthPctBelow/SelfHealthPctBelow/ResourceAtLeast/Aura(Missing|Present)On(Self|Target),
+    // siehe BotMgr.h):
+    //   - Priest Discipline (256): Atonement-Mechanik heilt ueber Schaden an EINEM Ziel (Smite/Holy
+    //     Fire) waehrend das eigentliche Heilziel ein ANDERES Ziel ist (Atonement-Traeger) - das
+    //     Framework kennt aktuell nur EIN Ziel pro Tick-Entscheidung.
+    //   - Monk Brewmaster (268): Stagger-Schweregrad (leicht/mittel/schwer) ist keine einfache
+    //     Aura-Anwesenheit, sondern ein Stack-/Prozentwert - braucht einen neuen Bedingungstyp.
+    //   - Monk Windwalker (269): Fists-of-Fury->Rising-Sun-Kick->Whirling-Dragon-Punch-Combo braucht
+    //     Reihenfolge-/Timing-Gedaechtnis ueber mehrere Ticks hinweg, keine reine Prioritaetsliste.
+    //   - Warlock Demonology (266): laut Recherche selbst als NIEDRIGE Konfidenz markiert (mehrfache
+    //     grundlegende Neugestaltung waehrend Legion, keine 7.3.5-datierte Quelle verifizierbar).
+    //   - Shaman Enhancement (263), Druid Feral (103), Druid Guardian (104): in dieser
+    //     Recherche-Runde nicht abgedeckt (siehe Aufgabenverteilung der drei Recherche-Agents).
+    // Rogue Outlaw (260) IST enthalten, aber mit einer bewusst vereinfachten "Roll the Bones nur
+    // erneuern, wenn abgelaufen"-Regel statt der eigentlichen (in der Recherche selbst als umstritten/
+    // patchabhaengig markierten) Wuerfel-Qualitaetsbewertung - siehe Kommentar dort.
+    std::vector<BotSpecRotation> g_BotSpecRotations =
+    {
+        // --- Protection Warrior (specId 73) - Tank ---------------------------------------------
+        // Quelle: "Shield Block > Ignore Pain, Rest ist Rage-Generierung" - als Kernphilosophie mit
+        // HOHER Konfidenz recherchiert und laut Recherche ueber praktisch ganz Legion stabil (siehe
+        // PR-Bericht). Revenge/Shield Slam/Devastate-Reihenfolge darunter mit MITTLERER Konfidenz.
+        {
+            73, SPELLFAMILY_WARRIOR, BotRole::Tank,
+            {
+                { "Shield Block",  BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Shield Block" },
+                { "Ignore Pain",   BotRotationCondition::ResourceAtLeast,   60.0f, POWER_RAGE },
+                { "Revenge",       BotRotationCondition::Always },
+                { "Shield Slam",   BotRotationCondition::Always },
+                { "Devastate",     BotRotationCondition::Always }
+            },
+            "Pummel"
+        },
+        // --- Fury Warrior (specId 72) - Nahkampf-DPS -------------------------------------------
+        // Quelle: Bloodthirst/Raging Blow/Rampage-Kernschleife mit MITTEL-HOHER Konfidenz recherchiert
+        // (Rampage-vs-Raging-Blow-Feinreihenfolge laut Recherche talentabhaengig/schwaecher belegt,
+        // hier bewusst konservativ: Rampage erst ab hohem Rage-Wert, nicht bei jeder Gelegenheit).
+        {
+            72, SPELLFAMILY_WARRIOR, BotRole::MeleeDps,
+            {
+                { "Bloodthirst",   BotRotationCondition::Always },
+                { "Raging Blow",   BotRotationCondition::Always },
+                { "Rampage",       BotRotationCondition::ResourceAtLeast,     80.0f, POWER_RAGE },
+                { "Execute",       BotRotationCondition::TargetHealthPctBelow, 20.0f },
+                { "Whirlwind",     BotRotationCondition::Always }
+            },
+            "Pummel"
+        },
+        // --- Frost Mage (specId 64) - Fernkampf/Zauber-DPS -------------------------------------
+        // Quelle: Brain-Freeze->Flurry->Ice-Lance-"Shatter" und Fingers-of-Frost-Verbrauch mit HOHER
+        // Konfidenz recherchiert (mehrfach als stabile 7.3.5-Kernschleife bestaetigt). Frozen Orb/
+        // Ebonbolt auf Cooldown, Frostbolt als ressourcenloser Fuellschlag am Ende der Liste (immer
+        // bereit, feuert also automatisch, wenn nichts anderes bereit/zutreffend ist).
+        {
+            64, SPELLFAMILY_MAGE, BotRole::RangedDps,
+            {
+                { "Flurry",        BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Brain Freeze" },
+                { "Ice Lance",     BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Fingers of Frost" },
+                { "Frozen Orb",    BotRotationCondition::Always },
+                { "Ebonbolt",      BotRotationCondition::Always },
+                { "Frostbolt",     BotRotationCondition::Always }
+            },
+            "Counterspell"
+        },
+        // --- Restoration Shaman (specId 264) - Heiler ------------------------------------------
+        // Quelle: Riptide-Erhalt + Healing-Wave/-Surge-Kosten-Abstufung mit HOHER Konfidenz
+        // recherchiert (laut Recherche ueber praktisch ganz Legion stabile Kernidentitaet). "Ziel" ist
+        // hier IMMER das von SelectBotHealTarget() gewaehlte Gruppenmitglied, nicht ein Gegner -
+        // TargetHealthPctBelow greift deshalb identisch wie bei DPS-Rollen, nur bezogen auf das
+        // Heilziel statt einen Feind (siehe BotRotationCondition-Kommentar in BotMgr.h).
+        {
+            264, SPELLFAMILY_SHAMAN, BotRole::Healer,
+            {
+                { "Healing Surge", BotRotationCondition::TargetHealthPctBelow, 35.0f },
+                { "Riptide",       BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Riptide" },
+                { "Chain Heal",    BotRotationCondition::TargetHealthPctBelow, 80.0f },
+                { "Healing Wave",  BotRotationCondition::Always }
+            },
+            nullptr, "Purify Spirit"
+        },
+
+        // ==================== Runde 2: 25 weitere Skillungen (siehe Kopfkommentar oben) ====================
+
+        // --- Warrior Arms (specId 71) - Nahkampf-DPS --- MITTEL: Colossus-Smash-Fenster-Feinsteuerung
+        // (Mortal Strike bevorzugt WAEHREND des Fensters) ist hier NICHT modelliert - Colossus Smash und
+        // Mortal Strike laufen beide einfach "on cooldown", was strukturell korrekt aber nicht
+        // burst-optimal ist (dokumentierte Vereinfachung).
+        {
+            71, SPELLFAMILY_WARRIOR, BotRole::MeleeDps,
+            {
+                { "Colossus Smash", BotRotationCondition::Always },
+                { "Mortal Strike",  BotRotationCondition::Always },
+                { "Execute",        BotRotationCondition::TargetHealthPctBelow, 20.0f },
+                { "Overpower",      BotRotationCondition::Always },
+                { "Slam",           BotRotationCondition::Always }
+            },
+            "Pummel"
+        },
+        // --- Paladin Protection (specId 66) - Tank --- HOCH auf "Shield of the Righteous halten"-
+        // Kernidentitaet, MITTEL auf Avenger's-Shield-vs-Judgment-Feinreihenfolge.
+        {
+            66, SPELLFAMILY_PALADIN, BotRole::Tank,
+            {
+                { "Shield of the Righteous", BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Shield of the Righteous" },
+                { "Judgment",                BotRotationCondition::Always },
+                { "Avenger's Shield",        BotRotationCondition::Always },
+                { "Consecration",            BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Consecration" },
+                { "Hammer of the Righteous", BotRotationCondition::Always }
+            },
+            "Rebuke"
+        },
+        // --- Paladin Retribution (specId 70) - Nahkampf-DPS --- MITTEL-HOCH: Judgment-Fenster-
+        // Mechanik (Templar's Verdict bevorzugt waehrend des Judgment-Debuffs) recherchiert, hier
+        // vereinfacht als reine Holy-Power-Schwelle statt Debuff-Timing-Praezision.
+        {
+            70, SPELLFAMILY_PALADIN, BotRole::MeleeDps,
+            {
+                { "Judgment",         BotRotationCondition::Always },
+                { "Templar's Verdict", BotRotationCondition::ResourceAtLeast, 3.0f, POWER_HOLY_POWER },
+                { "Blade of Justice", BotRotationCondition::Always },
+                { "Crusader Strike",  BotRotationCondition::Always }
+            },
+            "Rebuke"
+        },
+        // --- Paladin Holy (specId 65) - Heiler --- HOCH: Beacon-of-Light/Holy-Shock-Kernidentitaet.
+        // Light of Dawn (AoE-Holy-Power-Spender) bewusst weggelassen - Framework hat aktuell kein
+        // AoE-Heilziel-Modell (siehe BotMgr.h SelectBotHealTarget(), waehlt IMMER genau EIN Ziel).
+        {
+            65, SPELLFAMILY_PALADIN, BotRole::Healer,
+            {
+                { "Beacon of Light", BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Beacon of Light" },
+                { "Holy Shock",      BotRotationCondition::Always },
+                { "Flash of Light",  BotRotationCondition::TargetHealthPctBelow, 50.0f },
+                { "Holy Light",      BotRotationCondition::Always }
+            },
+            nullptr, "Cleanse"
+        },
+        // --- Death Knight Blood (specId 250) - Tank --- MITTEL: Death-Strike/Bone-Shield-Kernloop
+        // korrekt, aber exakte Bone-Shield-Stack-Schwelle/Rune-Kosten laut Recherche selbst nicht
+        // patchgenau bestaetigt - hier vereinfacht als reine Aura-Anwesenheit statt Stack-Zaehler.
+        {
+            250, SPELLFAMILY_DEATHKNIGHT, BotRole::Tank,
+            {
+                { "Marrowrend",  BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Bone Shield" },
+                { "Death Strike", BotRotationCondition::ResourceAtLeast, 45.0f, POWER_RUNIC_POWER },
+                { "Heart Strike", BotRotationCondition::Always }
+            },
+            "Mind Freeze"
+        },
+        // --- Death Knight Frost (specId 251) - Nahkampf-DPS --- MITTEL-HOCH, inkl. 7.3.5-spezifischem
+        // Disintegration-Talent-Detail (Killing-Machine-Verlaengerung durch Frost Strike/Howling
+        // Blast). 2H-Build angenommen (laut Recherche in Spaet-Legion der dominante/haeufigere Build).
+        {
+            251, SPELLFAMILY_DEATHKNIGHT, BotRole::MeleeDps,
+            {
+                { "Obliterate",   BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Killing Machine" },
+                { "Frost Strike", BotRotationCondition::ResourceAtLeast, 60.0f, POWER_RUNIC_POWER },
+                { "Howling Blast", BotRotationCondition::Always },
+                { "Remorseless Winter", BotRotationCondition::Always }
+            },
+            "Mind Freeze"
+        },
+        // --- Death Knight Unholy (specId 252) - Nahkampf-DPS --- MITTEL-HOCH (Festering-Wound-
+        // Builder/Popper-Loop und die genannten Talente sind gut belegt). Apocalypse (Wound-Stack-
+        // gated) bewusst weggelassen - braucht Stack-Zaehler, den das Framework noch nicht kennt.
+        {
+            252, SPELLFAMILY_DEATHKNIGHT, BotRole::MeleeDps,
+            {
+                { "Festering Strike", BotRotationCondition::Always },
+                { "Scourge Strike",   BotRotationCondition::Always },
+                { "Death Coil",       BotRotationCondition::ResourceAtLeast, 60.0f, POWER_RUNIC_POWER },
+                { "Outbreak",         BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Virulent Plague" }
+            },
+            "Mind Freeze"
+        },
+        // --- Rogue Assassination (specId 259) - Nahkampf-DPS --- MITTEL-HOCH, explizit als 7.3.5-
+        // Quelle bestaetigt (guiaswow.com "Patch 7.3.5"-Seite).
+        {
+            259, SPELLFAMILY_ROGUE, BotRole::MeleeDps,
+            {
+                { "Garrote",  BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Garrote" },
+                { "Rupture",  BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Rupture" },
+                { "Envenom",  BotRotationCondition::ResourceAtLeast, 4.0f, POWER_COMBO_POINTS },
+                { "Mutilate", BotRotationCondition::Always }
+            },
+            "Kick"
+        },
+        // --- Rogue Outlaw (specId 260) - Nahkampf-DPS --- MITTEL: Roll-the-Bones-"Reroll wenn
+        // schlechte Wuerfe"-Feinlogik ist laut Recherche selbst patchabhaengig/umstritten und deshalb
+        // NICHT modelliert - hier bewusst vereinfacht auf "erneuere nur, wenn der Buff komplett
+        // abgelaufen ist" (AuraMissingOnSelf), niemals eine aktive Buff-Kombination verwerfen.
+        {
+            260, SPELLFAMILY_ROGUE, BotRole::MeleeDps,
+            {
+                { "Roll the Bones",  BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Roll the Bones" },
+                { "Between the Eyes", BotRotationCondition::ResourceAtLeast, 5.0f, POWER_COMBO_POINTS },
+                { "Saber Slash",     BotRotationCondition::Always }
+            },
+            "Kick"
+        },
+        // --- Rogue Subtlety (specId 261) - Nahkampf-DPS --- MITTEL-HOCH inkl. konkretem Opener aus der
+        // Recherche (hier nur die Kernschleife, kein separater Opener-Zustand).
+        {
+            261, SPELLFAMILY_ROGUE, BotRole::MeleeDps,
+            {
+                { "Symbols of Death", BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Symbols of Death" },
+                { "Nightblade",       BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Nightblade" },
+                { "Eviscerate",       BotRotationCondition::ResourceAtLeast, 5.0f, POWER_COMBO_POINTS },
+                { "Backstab",         BotRotationCondition::Always }
+            },
+            "Kick"
+        },
+        // --- Demon Hunter Havoc (specId 577) - Nahkampf-DPS --- MITTEL-HOCH. Momentum-Build (Fel Rush
+        // offensiv fuer den Buff nutzen) bewusst weggelassen - talentabhaengige Sonderlogik.
+        {
+            577, SPELLFAMILY_DEMON_HUNTER, BotRole::MeleeDps,
+            {
+                { "Chaos Strike", BotRotationCondition::Always },
+                { "Blade Dance",  BotRotationCondition::Always },
+                { "Eye Beam",     BotRotationCondition::Always },
+                { "Demon's Bite", BotRotationCondition::Always }
+            },
+            "Disrupt"
+        },
+        // --- Demon Hunter Vengeance (specId 581) - Tank --- MITTEL: Soul-Fragment-Zaehler (steuert
+        // Soul-Cleave-vs-Spirit-Bomb-Wahl) nicht modelliert - hier fest auf den Soul-Cleave-Build
+        // vereinfacht (laut Recherche der "sicherere"/einfachere der beiden Spaet-Legion-Builds).
+        {
+            581, SPELLFAMILY_DEMON_HUNTER, BotRole::Tank,
+            {
+                { "Immolation Aura", BotRotationCondition::Always },
+                { "Demon Spikes",    BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Demon Spikes" },
+                { "Sigil of Flame",  BotRotationCondition::Always },
+                { "Soul Cleave",     BotRotationCondition::Always }
+            },
+            "Disrupt"
+        },
+        // --- Mage Arcane (specId 62) - Fernkampf/Zauber-DPS --- HOCH: Arcane-Charges sind in diesem
+        // Core als echte Ressource (POWER_ARCANE_CHARGES) implementiert, passt direkt ins
+        // ResourceAtLeast-Modell. Burn/Evocation-Manazyklus (Rune of Power) bewusst weggelassen -
+        // braucht eigenen Ressourcen-Pooling-Zustand ueber mehrere Ticks.
+        {
+            62, SPELLFAMILY_MAGE, BotRole::RangedDps,
+            {
+                { "Arcane Missiles", BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Clearcasting" },
+                { "Arcane Barrage",  BotRotationCondition::ResourceAtLeast, 4.0f, POWER_ARCANE_CHARGES },
+                { "Arcane Blast",    BotRotationCondition::Always }
+            },
+            "Counterspell"
+        },
+        // --- Mage Fire (specId 63) - Fernkampf/Zauber-DPS --- HOCH auf die Hot-Streak/Heating-Up-
+        // Proc-Kernschleife. Combustion-Cooldown-Timing (auf Hot Streak warten, dann pop) bewusst
+        // weggelassen - Cooldown selbst ist in dieser Tabelle nicht enthalten, kann spaeter als
+        // zusaetzlicher Schritt (Always, hohe Prioritaet) ergaenzt werden.
+        {
+            63, SPELLFAMILY_MAGE, BotRole::RangedDps,
+            {
+                { "Pyroblast",       BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Hot Streak" },
+                { "Fire Blast",      BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Heating Up" },
+                { "Phoenix's Flames", BotRotationCondition::Always },
+                { "Fireball",        BotRotationCondition::Always }
+            },
+            "Counterspell"
+        },
+        // --- Warlock Affliction (specId 265) - Fernkampf/Zauber-DPS --- HOCH auf die
+        // Agony/Corruption/Unstable-Affliction-Dauerpflege-Identitaet.
+        {
+            265, SPELLFAMILY_WARLOCK, BotRole::RangedDps,
+            {
+                { "Agony",               BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Agony" },
+                { "Corruption",          BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Corruption" },
+                { "Unstable Affliction", BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Unstable Affliction" },
+                { "Drain Soul",          BotRotationCondition::Always }
+            }
+        },
+        // --- Warlock Destruction (specId 267) - Fernkampf/Zauber-DPS --- HOCH: Immolate-Dauerpflege +
+        // Conflagrate-fuer-Shards + Chaos-Bolt-als-Spender ist laut Recherche ueber 7.2/7.3.5 stabil.
+        {
+            267, SPELLFAMILY_WARLOCK, BotRole::RangedDps,
+            {
+                { "Immolate",    BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Immolate" },
+                { "Conflagrate", BotRotationCondition::Always },
+                { "Chaos Bolt",  BotRotationCondition::ResourceAtLeast, 2.0f, POWER_SOUL_SHARDS },
+                { "Incinerate",  BotRotationCondition::Always }
+            }
+        },
+        // --- Priest Shadow (specId 258) - Fernkampf/Zauber-DPS --- HOCH auf SW:P/VT-Dauerpflege und
+        // die Void-Eruption/Voidform-Kernmechanik. Voidform-Eintrittsschwelle als ResourceAtLeast(90)
+        // angenaehert (Recherche nennt 65-90 talentabhaengig) - bewusst der hoehere/sicherere Wert.
+        {
+            258, SPELLFAMILY_PRIEST, BotRole::RangedDps,
+            {
+                { "Void Eruption",     BotRotationCondition::ResourceAtLeast, 90.0f, POWER_INSANITY },
+                { "Void Bolt",         BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Voidform" },
+                { "Shadow Word: Pain", BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Shadow Word: Pain" },
+                { "Vampiric Touch",    BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Vampiric Touch" },
+                { "Mind Blast",        BotRotationCondition::Always },
+                { "Mind Flay",         BotRotationCondition::Always }
+            }
+        },
+        // --- Priest Holy (specId 257) - Heiler --- HOCH auf Heal/Flash-Heal-Fuellschlag +
+        // Renew-Dauerpflege. Holy-Word-Serenity-Freicast-Proc (alle ~4 Casts) nicht modelliert -
+        // braucht einen Cast-Zaehler-Zustand, den das Framework noch nicht kennt.
+        {
+            257, SPELLFAMILY_PRIEST, BotRole::Healer,
+            {
+                { "Flash Heal", BotRotationCondition::TargetHealthPctBelow, 40.0f },
+                { "Renew",      BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Renew" },
+                { "Heal",       BotRotationCondition::Always }
+            },
+            nullptr, "Dispel Magic"
+        },
+        // --- Shaman Elemental (specId 262) - Fernkampf/Zauber-DPS --- HOCH auf Flame-Shock/Lava-Burst/
+        // Maelstrom-Kernschleife (direkt analog zu Immolate/Destruction oben).
+        {
+            262, SPELLFAMILY_SHAMAN, BotRole::RangedDps,
+            {
+                { "Lava Burst",    BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Lava Surge" },
+                { "Earth Shock",   BotRotationCondition::ResourceAtLeast, 60.0f, POWER_MAELSTROM },
+                { "Flame Shock",   BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Flame Shock" },
+                { "Lightning Bolt", BotRotationCondition::Always }
+            },
+            "Wind Shear"
+        },
+        // --- Druid Balance (specId 102) - Fernkampf/Zauber-DPS --- HOCH auf Moonfire/Sunfire-
+        // Dauerpflege. Astral Power ist in diesem Core ueber POWER_LUNAR_POWER hinterlegt (historischer
+        // interner Name, siehe SharedDefines.h). Eclipse-Builder-Wechsel (Wrath/Starfire je nach
+        // Sonne/Mond-Zustand) nicht modelliert - Wrath wird hier immer als Fuellschlag genutzt.
+        {
+            102, SPELLFAMILY_DRUID, BotRole::RangedDps,
+            {
+                { "Starsurge", BotRotationCondition::ResourceAtLeast, 50.0f, POWER_LUNAR_POWER },
+                { "Moonfire",  BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Moonfire" },
+                { "Sunfire",   BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Sunfire" },
+                { "Wrath",     BotRotationCondition::Always }
+            }
+        },
+        // --- Druid Restoration (specId 105) - Heiler --- HOCH auf die HoT-Weaving-Kernidentitaet
+        // (Rejuvenation-Dauerpflege + Regrowth-Fuellheilung). Lifebloom (normalerweise fest auf dem
+        // Tank statt dem Niedrigst-Leben-Ziel gehalten) bewusst weggelassen - passt nicht zum
+        // "Heilziel = niedrigstes Leben"-Modell von SelectBotHealTarget().
+        {
+            105, SPELLFAMILY_DRUID, BotRole::Healer,
+            {
+                { "Rejuvenation", BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Rejuvenation" },
+                { "Regrowth",     BotRotationCondition::TargetHealthPctBelow, 50.0f },
+                { "Wild Growth",  BotRotationCondition::TargetHealthPctBelow, 80.0f }
+            },
+            nullptr, "Remove Corruption"
+        },
+        // --- Monk Mistweaver (specId 270) - Heiler --- HOCH auf Renewing-Mist/Vivify/Enveloping-Mist-
+        // Kernidentitaet. Soothing-Mist-Channel-Interaktion (erlaubt Bewegung waehrend andere Zauber
+        // gecastet werden) nicht modelliert - fuer einen Bot ohnehin irrelevant (kein Movement-Zwang).
+        {
+            270, SPELLFAMILY_MONK, BotRole::Healer,
+            {
+                { "Renewing Mist",  BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Renewing Mist" },
+                { "Enveloping Mist", BotRotationCondition::TargetHealthPctBelow, 50.0f },
+                { "Vivify",         BotRotationCondition::Always }
+            },
+            nullptr, "Detox"
+        },
+        // --- Hunter Beast Mastery (specId 253) - Fernkampf-DPS --- MITTEL-HOCH auf Kill-Command/
+        // Bestial-Wrath-Kernschleife, Cobra Shot als Fokus-Fuellschlag. KORREKTUR (Livetest-Fund Runde
+        // 7, '.bottest diagspells' meldete "Barbed Shot" als in diesem Build nicht auffindbar): "Barbed
+        // Shot" ist eine Battle-for-Azeroth-Faehigkeit (Patch 8.0), existiert in Legion 7.3.5 schlicht
+        // noch nicht - die urspruengliche Recherche hatte hier faelschlich eine spaetere Patch-Version
+        // uebernommen (genau der Fehler, den die "nur 7.3.5-verifizierte Namen"-Regel verhindern soll).
+        // Ersatzlos entfernt statt durch eine geratene 7.3.5-Alternative ersetzt.
+        {
+            253, SPELLFAMILY_HUNTER, BotRole::RangedDps,
+            {
+                { "Kill Command", BotRotationCondition::Always },
+                { "Bestial Wrath", BotRotationCondition::Always },
+                { "Cobra Shot",   BotRotationCondition::Always }
+            },
+            "Counter Shot"
+        },
+        // --- Hunter Marksmanship (specId 254) - Fernkampf-DPS --- MITTEL: "Vulnerable"-Debuff-Synergie
+        // (Aimed Shot/Marked Shot bevorzugt WAEHREND Vulnerable aktiv ist) nicht modelliert - beide
+        // Schuesse sind unabhaengig von Vulnerable castbar, hier bewusst auf eine simple 2-Schritt-
+        // Prioritaet reduziert statt eine falsche Bedingung zu erfinden.
+        {
+            254, SPELLFAMILY_HUNTER, BotRole::RangedDps,
+            {
+                { "Aimed Shot",  BotRotationCondition::Always },
+                { "Arcane Shot", BotRotationCondition::Always }
+            },
+            "Counter Shot"
+        },
+        // --- Hunter Survival (specId 255) - Nahkampf-DPS --- MITTEL. WICHTIG: in Legion ist Survival
+        // eine NAHKAMPF-Skillung (Wildfire Bomb/Raptor Strike/Mongoose Bite) - komplett anders als in
+        // jedem anderen Patch (Classic-BfA-Fernkampf bzw. Shadowlands+-Rework). Mongoose-Bite-Stack-
+        // Fenster (mehrfach hintereinander casten waehrend Mongoose-Fury aktiv ist) nicht modelliert -
+        // Raptor Strike als sichererer, stack-unabhaengiger Standard-Finisher gewaehlt.
+        // OFFENER LIVETEST-FUND (Runde 7): '.bottest diagspells' meldete "Wildfire Bomb" als in diesem
+        // Build nicht aufloesbar (weder unter SPELLFAMILY_HUNTER noch ueber den neuen klassenuebergreifenden
+        // Fallback in ResolveSpellIdByName()). Anders als bei "Barbed Shot" (Hunter BM, oben) ist NICHT
+        // sicher genug bekannt, ob "Wildfire Bomb" in 7.3.5 schlicht noch nicht existiert (wie Barbed
+        // Shot) oder nur anders benannt ist - deshalb bewusst NICHT geraten/ersetzt. Vor Live-Einsatz mit
+        // '.lookup spell wildfire' bzw. '.lookup spell bomb' pruefen und diese Zeile entsprechend
+        // korrigieren; bis dahin bleibt der Schritt inaktiv, der Rest der Rotation (Raptor Strike/Serpent
+        // Sting) funktioniert unveraendert weiter.
+        {
+            255, SPELLFAMILY_HUNTER, BotRole::MeleeDps,
+            {
+                { "Wildfire Bomb",  BotRotationCondition::Always },
+                { "Serpent Sting",  BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Serpent Sting" },
+                { "Raptor Strike",  BotRotationCondition::Always }
+            },
+            "Counter Shot"
+        },
+
+        // ==================== Runde 3: die 4 zuvor mit Begruendung ausgelassenen Skillungen, jetzt ====
+        // ==================== per Framework-Erweiterung (TargetOverride) bzw. Mehrfach-Schritten ======
+        // ==================== geloest - siehe BotMgr.h "BotRotationTargetOverride"-Kommentar. =========
+
+        // --- Priest Discipline (specId 256) - Heiler --- HOCH auf die Atonement/Barrier/Rapture-
+        // Beziehung. Loest das urspruengliche Problem "Atonement heilt ueber Schaden an einem ANDEREN
+        // Ziel als dem Heilziel" ueber TargetOverride: Power Word: Shield/Shadow Mend gehen an das per
+        // ForceHealTarget erzwungene Heilziel (traegt danach Atonement), Smite geht an ForceEnemy (den
+        // aktuellen Kampf-Gegner) und heilt darueber alle Atonement-Traeger als Nebeneffekt der
+        // Blizzard-eigenen Spell-Effekt-Logik - kein Zusatzcode in BotMgr fuer den Heilungs-Nebeneffekt
+        // noetig, das macht der Core-Spelleffekt von Smite/Holy Fire bereits selbst. Rapture/Power Word:
+        // Barrier (AoE-Cooldowns) bewusst weggelassen - kein AoE-Ziel-Modell vorhanden (siehe Holy
+        // Paladin/Light of Dawn-Kommentar oben).
+        {
+            256, SPELLFAMILY_PRIEST, BotRole::Healer,
+            {
+                { "Power Word: Shield", BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Atonement",
+                    BotRotationTargetOverride::ForceHealTarget },
+                { "Shadow Mend",        BotRotationCondition::TargetHealthPctBelow, 30.0f, 0, nullptr,
+                    BotRotationTargetOverride::ForceHealTarget },
+                { "Smite",              BotRotationCondition::Always, 0.0f, 0, nullptr,
+                    BotRotationTargetOverride::ForceEnemy }
+            },
+            nullptr, "Dispel Magic"
+        },
+        // --- Monk Brewmaster (specId 268) - Tank --- HOCH auf die Stagger/Ironskin-Brew/Purifying-
+        // Brew-Ladungs-Mechanik als KONZEPT, MITTEL auf die konkrete Umsetzung hier: die echte Client-
+        // Mechanik kennt abgestufte Stagger-Schweregrade (leicht/mittel/schwer) als eigene, interne
+        // Auren ("Light/Moderate/Heavy Stagger") - werden hier als zwei AuraPresentOnSelf-Schritte
+        // (Heavy zuerst, dann Moderate als Rueckfall) angenommen. NICHT unabhaengig bestaetigt, dass
+        // diese Aura-NAMEN exakt so in diesem Server-Build 26972 vorliegen - ResolveSpellIdByName()
+        // schlaegt sauber fehl (TC_LOG_ERROR, Schritt bleibt inaktiv) statt falsch zu casten, falls
+        // nicht; mit '.lookup spell stagger' pruefen und ggf. den Namen hier anpassen.
+        {
+            268, SPELLFAMILY_MONK, BotRole::Tank,
+            {
+                { "Purifying Brew", BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Heavy Stagger" },
+                { "Purifying Brew", BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Moderate Stagger" },
+                { "Ironskin Brew",  BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Ironskin Brew" },
+                { "Keg Smash",      BotRotationCondition::Always },
+                { "Blackout Strike", BotRotationCondition::Always },
+                { "Tiger Palm",     BotRotationCondition::Always }
+            },
+            "Spear Hand Strike"
+        },
+        // --- Monk Windwalker (specId 269) - Nahkampf-DPS --- MITTEL-HOCH auf die Namen/Grundreihenfolge
+        // (Fists of Fury vor Rising Sun Kick vor Whirling Dragon Punch), NIEDRIG auf die exakte Combo-
+        // Timing-Voraussetzung: Whirling Dragon Punch verlangt laut Recherche, dass BEIDE anderen
+        // Faehigkeiten kuerzlich benutzt wurden - dieses Framework hat aktuell kein Mehr-Tick-
+        // Sequenz-Gedaechtnis (siehe BotMgr.h-Roadmap-Kommentar), deshalb steht der Schritt hier als
+        // einfaches "Always" in Prioritaetsreihenfolge. Ist die Combo-Voraussetzung nicht erfuellt,
+        // scheitert Spell::CheckCast() intern (Core-eigene Validierung, KEIN Absturz) - der Bot
+        // verschwendet in diesem Fall einen Tick-Versuch, bevor die naechste Prioritaet (Tiger Palm)
+        // beim naechsten Kampf-KI-Tick zum Zug kommt. Touch of Death/Serenity/Storm-Earth-and-Fire
+        // bewusst weggelassen (Execute-Schwelle bzw. talentabhaengige Cooldowns).
+        {
+            269, SPELLFAMILY_MONK, BotRole::MeleeDps,
+            {
+                { "Fists of Fury",        BotRotationCondition::Always },
+                { "Rising Sun Kick",      BotRotationCondition::Always },
+                { "Whirling Dragon Punch", BotRotationCondition::Always },
+                { "Tiger Palm",           BotRotationCondition::Always }
+            },
+            "Spear Hand Strike"
+        },
+        // --- Warlock Demonology (specId 266) - Fernkampf/Zauber-DPS --- NIEDRIG (von der urspruenglichen
+        // Recherche selbst so markiert: Demonology wurde waehrend Legion mehrfach grundlegend
+        // umgestaltet, keine 7.3.5-datierte Primaerquelle in der Recherche-Sandbox verifizierbar - vor
+        // Live-Einsatz dringend gegen eine 7.3.5-spezifische Quelle/SimC-APL nachpruefen, mehr als bei
+        // jeder anderen Tabellenzeile in dieser Datei).
+        {
+            266, SPELLFAMILY_WARLOCK, BotRole::RangedDps,
+            {
+                { "Doom",               BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Doom" },
+                { "Call Dreadstalkers", BotRotationCondition::Always },
+                { "Hand of Gul'dan",    BotRotationCondition::ResourceAtLeast, 4.0f, POWER_SOUL_SHARDS },
+                { "Demonbolt",          BotRotationCondition::AuraPresentOnSelf, 0.0f, 0, "Demonic Core" },
+                { "Shadow Bolt",        BotRotationCondition::Always }
+            }
+        },
+
+        // ==================== Runde 4: die letzten 3 Skillungen - 36/36 vollstaendig ====================
+
+        // --- Shaman Enhancement (specId 263) - Nahkampf-DPS --- HOCH auf den Generator/Spender-Loop
+        // (Boulderfist/Rockbiter baut Maelstrom auf, Stormstrike/Lava Lash geben es aus), MITTEL auf die
+        // genaue Talentreihen-Platzierung der Level-100-Cooldown-Wahl (laut Recherche selbst als
+        // niedrigste Konfidenz-Einzelheit markiert - hier bewusst nicht aufgenommen). Der Stormbringer-
+        // Freicast-Proc AENDERT laut Recherche nicht WELCHE Faehigkeit gecastet wird (weiterhin
+        // Stormstrike), nur ihre Kosten/ihr Cooldown - deshalb reicht ein einfacher "Always"-Schritt statt
+        // einer eigenen Proc-Bedingung (anders als z.B. bei Frost Mage, wo der Proc die Faehigkeitswahl
+        // selbst bestimmt).
+        {
+            263, SPELLFAMILY_SHAMAN, BotRole::MeleeDps,
+            {
+                { "Feral Spirit", BotRotationCondition::Always },
+                { "Stormstrike",  BotRotationCondition::Always },
+                { "Lava Lash",    BotRotationCondition::Always },
+                { "Boulderfist",  BotRotationCondition::Always }
+            },
+            "Wind Shear"
+        },
+        // --- Druid Feral (specId 103) - Nahkampf-DPS --- HOCH auf die Rake/Rip/Savage-Roar-Dauerpflege-
+        // Identitaet (7.3.5-spezifisch bestaetigt: Savage-Roar-Dauer erhoeht/Schadensbonus gesenkt
+        // gegenueber frueherem Legion-Patch, siehe Recherche). Savage Roar selbst (reiner Schadens-Buff,
+        // keine DoT/Aura-auf-Ziel) bewusst weggelassen - passt nicht sauber in AuraMissingOnSelf ohne
+        // eigene Prioritaets-Verzerrung. Rip/Ferocious-Bite-Kombopunkt-Kosten werden NICHT separat
+        // geprueft (kein UND-Verknuepfer fuer zwei Bedingungen im aktuellen Vokabular) - verlaesst sich
+        // auf die core-eigene Ressourcenpruefung beim tatsaechlichen Cast-Versuch (dieselbe dokumentierte
+        // Vereinfachung wie bei Windwalker Monk).
+        {
+            103, SPELLFAMILY_DRUID, BotRole::MeleeDps,
+            {
+                { "Tiger's Fury",   BotRotationCondition::Always },
+                { "Rake",           BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Rake" },
+                { "Rip",            BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Rip" },
+                { "Ferocious Bite", BotRotationCondition::ResourceAtLeast, 5.0f, POWER_COMBO_POINTS },
+                { "Shred",          BotRotationCondition::Always }
+            },
+            "Skull Bash"
+        },
+        // --- Druid Guardian (specId 104) - Tank --- HOCH: Ironfur als kontinuierlich zu erneuernde
+        // aktive Mitigation ist derselbe "diese Faehigkeit hochhalten"-Musterfall wie Shield Block
+        // (Warrior)/Shield of the Righteous (Paladin)/Demon Spikes (DH) oben - Recherche bestaetigt
+        // explizit "Ironfur vor Mangle/Thrash priorisieren, wenn physischer Schaden eingeht".
+        {
+            104, SPELLFAMILY_DRUID, BotRole::Tank,
+            {
+                { "Ironfur", BotRotationCondition::AuraMissingOnSelf, 0.0f, 0, "Ironfur" },
+                { "Mangle",  BotRotationCondition::Always },
+                { "Thrash",  BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Thrash" },
+                { "Moonfire", BotRotationCondition::AuraMissingOnTarget, 0.0f, 0, "Moonfire" },
+                { "Maul",    BotRotationCondition::Always }
+            },
+            "Skull Bash"
+        }
+    };
+}
+
+namespace
+{
+    // Ein einzelner Scan-Durchlauf ueber sSpellMgr, optional auf eine SpellFamilyName gefiltert (siehe
+    // BotMgr::ResolveSpellIdByName() unten fuer die beiden Aufrufer dieser Funktion: der gefilterte
+    // Haupt-Durchlauf und der ungefilterte Fallback-Durchlauf). Unter mehreren exakten Namenstreffern
+    // wird die HOECHSTE Spell-Id zurueckgegeben (siehe Kommentar im Aufrufer fuer die Begruendung -
+    // Livetest-Fund Runde 7: alte Rang-Duplikate aus Classic-Cata haben durchgehend NIEDRIGERE Ids als
+    // die aktuelle 7.3.5-Version derselben Faehigkeit).
+    uint32 ScanSpellDb2ByName(std::wstring const& wantedLower, int64 spellFamilyFilter, uint32& outMatchCount)
+    {
+        uint32 found = 0;
+        outMatchCount = 0;
+        for (uint32 id = 0; id < sSpellMgr->GetSpellInfoStoreSize(); ++id)
+        {
+            SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(id);
+            if (!spellInfo)
+                continue;
+            if (spellFamilyFilter >= 0 && int64(spellInfo->SpellFamilyName) != spellFamilyFilter)
+                continue;
+            if (!spellInfo->SpellName || !spellInfo->SpellName->Str[LOCALE_enUS])
+                continue;
+
+            std::wstring candidate;
+            Utf8toWStr(spellInfo->SpellName->Str[LOCALE_enUS], candidate);
+            wstrToLower(candidate);
+            if (candidate == wantedLower)
+            {
+                found = id;
+                ++outMatchCount;
+            }
+        }
+        return found;
+    }
+}
+
+uint32 BotMgr::ResolveSpellIdByName(std::string const& englishName, uint32 spellFamily) const
+{
+    // Siehe voller Begruendung im BotMgr.h-Kopfkommentar ("Kampf-KI") und bei g_BotSpecRotations
+    // oben: numerische Spell-IDs sind ueber Patches hinweg NICHT stabil genug, um sie aus einer
+    // Web-Recherche zu uebernehmen. Stattdessen wird hier - nach demselben Muster wie das bereits
+    // existierende GM-Kommando '.lookup spell' (cs_lookup.cpp) - das TATSAECHLICH auf diesem Server
+    // geladene Spell.db2 (Build 26972) nach einem EXAKTEN, gross-/kleinschreibungsunabhaengigen
+    // Namens-Treffer durchsucht, zuerst auf spellFamily gefiltert (verhindert Kollisionen mit
+    // gleichnamigen Faehigkeiten anderer Klassen). Ergebnis ist dadurch garantiert korrekt fuer GENAU
+    // diese Server-Version, unabhaengig davon, ob die urspruengliche Recherchequelle fuer eine andere
+    // Buildnummer eine andere ID hatte.
+    static std::unordered_map<std::string, uint32> resolveCache;
+    std::string cacheKey = std::to_string(spellFamily) + ":" + englishName;
+    auto cacheItr = resolveCache.find(cacheKey);
+    if (cacheItr != resolveCache.end())
+        return cacheItr->second;
+
+    std::wstring wanted;
+    Utf8toWStr(englishName, wanted);
+    wstrToLower(wanted);
+
+    uint32 matchCount = 0;
+    uint32 found = ScanSpellDb2ByName(wanted, int64(spellFamily), matchCount);
+
+    // Livetest-Fund (Runde 7, siehe README-Commands.md/PR): Spell.db2 enthaelt fuer die meisten
+    // Grundfaehigkeiten mehrere exakte Namenstreffer - die alten Rang-Duplikate aus Classic bis Cata
+    // (z.B. "Frostbolt" existiert als Rank-1-Vanilla-Spell UND als aktuelle Legion-Version, gleicher
+    // Name, gleiche SpellFamilyName). Der urspruengliche "ersten Treffer nehmen"-Ansatz waehlte dadurch
+    // fast immer die NIEDRIGSTE/AELTESTE Id (Ids steigen historisch mit dem Einfuehrungspatch) statt
+    // der aktuellen 7.3.5-Version - ScanSpellDb2ByName() liefert stattdessen die HOECHSTE der
+    // gefundenen Ids (Blizzard fuegt bei einer Faehigkeits-Ueberarbeitung ueber Xpacs hinweg neue
+    // Spell.db2-Eintraege hinzu, alte Rang-Eintraege behalten dauerhaft ihre urspruengliche niedrige
+    // Id) - kein Ersatz fuer eine echte Verifikation (siehe '.bottest diagspells'/'.lookup spell'),
+    // aber eine deutlich zuverlaessigere Standardannahme als "erster Treffer".
+
+    if (matchCount == 0)
+    {
+        // Zweiter Livetest-Fund (Runde 7): einzelne, tatsaechlich existierende 7.3.5-Faehigkeiten/Auren
+        // (u.a. Demon Hunters "Disrupt", Mage "Clearcasting"/"Heating Up", Warlock "Demonic Core")
+        // loesten trotz korrektem Namen NICHT auf, vermutlich weil ihr SpellFamilyName-Feld in diesem
+        // DB2-Build von der fuer die jeweilige Klasse erwarteten SpellFamilyNames-Konstante abweicht
+        // (z.B. als SPELLFAMILY_GENERIC statt der Klassenfamilie klassifiziert). Fallback: wird beim
+        // gefilterten Durchlauf NICHTS gefunden, wird ungefiltert (ueber ALLE Klassen) erneut gesucht -
+        // GENAU EIN Treffer wird trotzdem uebernommen (Kollisionsschutz bleibt bestehen: liefert der
+        // Fallback mehrere Treffer ueber verschiedene Klassen, ist der Name zu mehrdeutig fuer eine
+        // automatische Entscheidung und es bleibt bei "nicht gefunden").
+        uint32 fallbackMatchCount = 0;
+        uint32 fallbackFound = ScanSpellDb2ByName(wanted, -1, fallbackMatchCount);
+        if (fallbackMatchCount == 1)
+        {
+            found = fallbackFound;
+            matchCount = 1;
+            TC_LOG_INFO("scripts.bots", "BotMgr::ResolveSpellIdByName: '%s' wurde NICHT unter "
+                "SpellFamilyName %u gefunden, aber eindeutig (1 Treffer) ueber alle Klassen hinweg - "
+                "verwende Spell-Id %u (tatsaechliche SpellFamilyName pruefen, falls das ueberrascht).",
+                englishName.c_str(), spellFamily, found);
+        }
+    }
+
+    if (matchCount == 0)
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::ResolveSpellIdByName: '%s' (SpellFamilyName %u) wurde in diesem "
+            "Server-Spell.db2 NICHT gefunden (auch nicht klassenuebergreifend) - der zugehoerige "
+            "Rotationsschritt bleibt dauerhaft inaktiv (kein Absturz). Moegliche Ursachen: Schreibweise "
+            "weicht vom recherchierten 7.3.5-Namen ab, oder diese Faehigkeit heisst in Build 26972 anders "
+            "(z.B. Talent-Umbenennung), oder sie existiert in diesem Patch schlicht noch nicht (spaeterer "
+            "Xpac) - mit '.lookup spell %s' pruefen.", englishName.c_str(), spellFamily, englishName.c_str());
+    }
+    else if (matchCount > 1)
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::ResolveSpellIdByName: '%s' (SpellFamilyName %u) ist MEHRDEUTIG "
+            "(%u exakte Treffer in Spell.db2, vermutlich alte Rang-Duplikate) - verwende Spell-Id %u "
+            "(HOECHSTE der gefundenen Ids), das sollte manuell per '.lookup spell %s' verifiziert werden.",
+            englishName.c_str(), spellFamily, matchCount, found, englishName.c_str());
+    }
+    resolveCache[cacheKey] = found;
+    return found;
+}
+
+BotSpecRotation const* BotMgr::GetOrResolveSpecRotation(uint32 specId) const
+{
+    for (BotSpecRotation const& rotation : g_BotSpecRotations)
+    {
+        if (rotation.SpecId != specId)
+            continue;
+
+        if (!rotation.ResolvedOnce)
+        {
+            for (BotRotationStep const& step : rotation.Priority)
+            {
+                step.ResolvedSpellId = ResolveSpellIdByName(step.SpellName, rotation.SpellFamily);
+                if (step.ConditionAuxSpellName)
+                    step.ResolvedAuxSpellId = ResolveSpellIdByName(step.ConditionAuxSpellName, rotation.SpellFamily);
+            }
+            if (rotation.InterruptSpellName)
+                rotation.ResolvedInterruptSpellId = ResolveSpellIdByName(rotation.InterruptSpellName, rotation.SpellFamily);
+            if (rotation.DispelSpellName)
+                rotation.ResolvedDispelSpellId = ResolveSpellIdByName(rotation.DispelSpellName, rotation.SpellFamily);
+            rotation.ResolvedOnce = true;
+            TC_LOG_INFO("scripts.bots", "BotMgr::GetOrResolveSpecRotation: Rotation fuer specId %u (SpellFamily %u) "
+                "einmalig gegen Spell.db2 aufgeloest (%u Schritte).", specId, rotation.SpellFamily,
+                uint32(rotation.Priority.size()));
+        }
+
+        return &rotation;
+    }
+
+    return nullptr;
+}
+
+bool BotMgr::EvaluateBotRotationCondition(Player* player, Unit* target, BotRotationStep const& step) const
+{
+    switch (step.Condition)
+    {
+        case BotRotationCondition::Always:
+            return true;
+        case BotRotationCondition::TargetHealthPctBelow:
+            return target && target->GetHealthPct() <= step.ConditionValue;
+        case BotRotationCondition::SelfHealthPctBelow:
+            return player->GetHealthPct() <= step.ConditionValue;
+        case BotRotationCondition::ResourceAtLeast:
+            return player->GetPower(Powers(step.ConditionAuxPower)) >= int32(step.ConditionValue);
+        case BotRotationCondition::AuraMissingOnSelf:
+            return step.ResolvedAuxSpellId != 0 && !player->HasAura(step.ResolvedAuxSpellId);
+        case BotRotationCondition::AuraPresentOnSelf:
+            return step.ResolvedAuxSpellId != 0 && player->HasAura(step.ResolvedAuxSpellId);
+        case BotRotationCondition::AuraMissingOnTarget:
+            return step.ResolvedAuxSpellId != 0 && target && !target->HasAura(step.ResolvedAuxSpellId);
+        default:
+            return false;
+    }
+}
+
+Unit* BotMgr::SelectBotCombatTarget(Player* bot) const
+{
+    if (Unit* victim = bot->GetVictim())
+        if (victim->IsAlive())
+            return victim;
+
+    // README-Luecke "kein autonomer Zustandsautomat" (Teilaspekt): kaempft bereits ein
+    // Gruppenmitglied, engagiert der Bot automatisch dasselbe Ziel mit, statt untaetig danebenzustehen
+    // und auf einen manuellen '.bottest attack'-Befehl zu warten. Fuer Nahkampf-naehe Distanz wird
+    // dieselbe Attack()+MoveChase()-Logik wie StartBotAttack() (Runde 122/Nebenbugfix) direkt hier
+    // ausgeloest - fuer Fernkampf/Zauber-Rollen reicht spaeter der reine Reichweiten-/LOS-Check in
+    // ProcessBotCombatAI() vor dem eigentlichen Spruch.
+    if (Group* group = bot->GetGroup())
+    {
+        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            Player* member = itr->GetSource();
+            if (!member || member == bot || !member->IsInWorld())
+                continue;
+
+            Unit* victim = member->GetVictim();
+            if (!victim || !victim->IsAlive() || victim->GetMapId() != bot->GetMapId())
+                continue;
+
+            if (!bot->IsInCombat() && bot->GetDistance(victim) <= BOT_MELEE_ENGAGE_RANGE)
+            {
+                bot->Attack(victim, true);
+                bot->GetMotionMaster()->MoveChase(victim);
+            }
+            return victim;
+        }
+    }
+
+    return nullptr;
+}
+
+Unit* BotMgr::SelectBotHealTarget(Player* bot) const
+{
+    Unit* lowestMember = nullptr;
+    float lowestPct = 100.0f;
+
+    auto consider = [&](Unit* candidate)
+    {
+        if (!candidate || !candidate->IsAlive() || candidate->GetMapId() != bot->GetMapId())
+            return;
+        float pct = candidate->GetHealthPct();
+        if (pct < lowestPct)
+        {
+            lowestPct = pct;
+            lowestMember = candidate;
+        }
+    };
+
+    consider(bot);
+    if (Group* group = bot->GetGroup())
+    {
+        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            Player* member = itr->GetSource();
+            if (member && member != bot)
+                consider(member);
+        }
+    }
+
+    // Bewusst nur zurueckgeben, wenn ueberhaupt jemand unter der Schwelle liegt - sonst tut die
+    // Heiler-Rotation in dieser ersten Runde schlicht nichts (kein Fuellschaden/-heilung ohne Bedarf).
+    return lowestPct <= BOT_HEAL_CONSIDER_THRESHOLD_PCT ? lowestMember : nullptr;
+}
+
+BotRole BotMgr::GetBotRole(uint32 accountId) const
+{
+    Player* player = GetBotPlayer(accountId);
+    if (!player)
+        return BotRole::Unknown;
+
+    if (BotSpecRotation const* rotation = GetOrResolveSpecRotation(player->GetPrimarySpecialization()))
+        return rotation->Role;
+
+    return BotRole::Unknown;
+}
+
+void BotMgr::ProcessBotCombatAI(uint32 accountId, uint32 diff)
+{
+    auto itr = _botSessions.find(accountId);
+    if (itr == _botSessions.end() || !itr->second.Session)
+        return;
+
+    itr->second.CombatAiTickAccumMs += diff;
+    if (itr->second.CombatAiTickAccumMs < BOT_COMBAT_AI_TICK_MS)
+        return;
+    itr->second.CombatAiTickAccumMs = 0;
+
+    Player* player = itr->second.Session->GetPlayer();
+    if (!player || !player->IsInWorld() || !player->IsAlive())
+        return;
+
+    // Laufender Fremd-Zauber (z.B. noch von einer vorherigen Entscheidung) wird nicht abgebrochen/
+    // ueberschrieben ("geclippt") - naechster Versuch beim naechsten Kampf-KI-Tick.
+    if (player->IsNonMeleeSpellCast(false))
+        return;
+
+    BotSpecRotation const* rotation = GetOrResolveSpecRotation(player->GetPrimarySpecialization());
+    if (!rotation)
+        return; // Skillung noch nicht verdrahtet - siehe Kopfkommentar bei g_BotSpecRotations
+
+    // Runde 3: BEIDE moeglichen Ziele im Voraus ermitteln (billig - jeweils nur eine Gruppen-Iteration/
+    // ein GetVictim()-Zugriff), damit einzelne Schritte per TargetOverride unabhaengig von der
+    // Skillungs-Rolle ein Gegner- oder Heilziel erzwingen koennen (siehe BotRotationTargetOverride-
+    // Kommentar in BotMgr.h, noetig fuer Discipline Priest's Atonement-Mechanik).
+    Unit* combatTarget = SelectBotCombatTarget(player);
+    Unit* healTarget = SelectBotHealTarget(player);
+    Unit* roleDefaultTarget = rotation->Role == BotRole::Healer ? healTarget : combatTarget;
+
+    if (!combatTarget && !healTarget)
+        return; // weder ein Kampfziel noch ein Heilbedarf - fuer diese Skillung aktuell nichts zu tun
+
+    // Generische Boss-Mechanik-Reaktionen (Ausweichen/Interrupt/Dispel, siehe BotMgr.h-Kommentar bei
+    // ProcessBotMechanicReactions()) haben Vorrang vor der normalen Rotation.
+    if (ProcessBotMechanicReactions(player, rotation, combatTarget, healTarget))
+        return;
+
+    for (BotRotationStep const& step : rotation->Priority)
+    {
+        if (!step.ResolvedSpellId)
+            continue; // Namensaufloesung ist fehlgeschlagen (siehe ResolveSpellIdByName()-Fehlerlog)
+
+        Unit* target = roleDefaultTarget;
+        if (step.TargetOverride == BotRotationTargetOverride::ForceEnemy)
+            target = combatTarget;
+        else if (step.TargetOverride == BotRotationTargetOverride::ForceHealTarget)
+            target = healTarget;
+
+        if (!target)
+            continue;
+
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(step.ResolvedSpellId);
+        if (!spellInfo || !player->HasSpell(step.ResolvedSpellId))
+            continue; // (noch) nicht erlernt, z.B. talentabhaengige Faehigkeit ohne diese Talentwahl
+
+        if (!player->GetSpellHistory()->IsReady(spellInfo))
+            continue;
+
+        if (!EvaluateBotRotationCondition(player, target, step))
+            continue;
+
+        float maxRange = spellInfo->GetMaxRange(false, player);
+        if (maxRange > 0.0f && player->GetDistance(target) > maxRange)
+            continue;
+        if (!player->IsWithinLOSInMap(target))
+            continue;
+
+        if (player->CastSpell(target, step.ResolvedSpellId, TRIGGERED_NONE))
+        {
+            TC_LOG_DEBUG("scripts.bots", "BotMgr::ProcessBotCombatAI: Account %u castet '%s' (Id %u) auf %s.",
+                accountId, step.SpellName, step.ResolvedSpellId, target->GetGUID().ToString().c_str());
+            return; // maximal ein Zauber pro Tick (gemeinsame GCD-Ressource, siehe Kopfkommentar)
+        }
+    }
+}
+
+namespace
+{
+    // Check-Funktor fuer FindHarmfulGroundEffectUnderBot()/WorldObjectListSearcher<Check> (siehe
+    // BotMgr.h-Kommentar bei ProcessBotMechanicReactions()). WorldObjectListSearcher<Check> ruft
+    // i_check(...) fuer JEDEN WorldObject-Untertyp auf, der in einer Grid-/World-Zelle vorkommen kann
+    // (Player/Creature/Corpse/GameObject/DynamicObject/AreaTrigger/SceneObject/Conversation - siehe
+    // GridNotifiersImpl.h), nicht nur fuer den einen Typ, an dem dieser Suchcode interessiert ist -
+    // anders als der schmalere AreaTriggerListSearcher<Check>, der nur AreaTrigger* kennt. Der
+    // Ueberladungs-Vorrang von C++ (nicht-Template-Ueberladung schlaegt Template-Instanziierung)
+    // erlaubt hier einen generischen Fallback fuer alle "uninteressanten" Typen plus genau eine
+    // konkrete Ueberladung fuer DynamicObject*, ohne dass fuer jeden Typ einzeln eine leere
+    // Ueberladung geschrieben werden muesste.
+    class BotHarmfulDynObjCheck
+    {
+    public:
+        BotHarmfulDynObjCheck(WorldObject const* searcher, float range) : _searcher(searcher), _range(range) { }
+
+        template<typename T>
+        bool operator()(T*) const { return false; }
+
+        bool operator()(DynamicObject* dynObj) const
+        {
+            return _searcher->IsWithinDistInMap(dynObj, _range);
+        }
+
+    private:
+        WorldObject const* _searcher;
+        float _range;
+    };
+}
+
+DynamicObject* BotMgr::FindHarmfulGroundEffectUnderBot(Player* bot, float searchRadius) const
+{
+    std::list<WorldObject*> candidates;
+
+    CellCoord cellCoord(Trinity::ComputeCellCoord(bot->GetPositionX(), bot->GetPositionY()));
+    Cell cell(cellCoord);
+    cell.SetNoCreate();
+
+    BotHarmfulDynObjCheck check(bot, searchRadius);
+    Trinity::WorldObjectListSearcher<BotHarmfulDynObjCheck> searcher(bot, candidates, check,
+        GRID_MAP_TYPE_MASK_DYNAMICOBJECT);
+
+    TypeContainerVisitor<Trinity::WorldObjectListSearcher<BotHarmfulDynObjCheck>, WorldTypeMapContainer> worldVisitor(searcher);
+    TypeContainerVisitor<Trinity::WorldObjectListSearcher<BotHarmfulDynObjCheck>, GridTypeMapContainer> gridVisitor(searcher);
+
+    cell.Visit(cellCoord, worldVisitor, *bot->GetMap(), *bot, searchRadius);
+    cell.Visit(cellCoord, gridVisitor, *bot->GetMap(), *bot, searchRadius);
+
+    for (WorldObject* candidate : candidates)
+    {
+        DynamicObject* dynObj = candidate->ToDynObject();
+        if (!dynObj)
+            continue;
+
+        // Nur SCHAEDLICHE persistente Flaecheneffekte sind fuer die Ausweich-Logik relevant (positive
+        // Bodeneffekte, z.B. Heil-Totems/-Zonen, sollen der Bot natuerlich nicht verlassen).
+        SpellInfo const* spellInfo = dynObj->GetSpellInfo();
+        if (!spellInfo || spellInfo->IsPositive())
+            continue;
+
+        // Zwei getrennte Radien (siehe BotMgr.h-Kommentar): searchRadius nur fuer die Grid-Vorauswahl,
+        // hier zaehlt einzig der TATSAECHLICHE Wirkradius des Effekts selbst.
+        if (bot->GetExactDist2d(dynObj) <= dynObj->GetRadius())
+            return dynObj;
+    }
+
+    return nullptr;
+}
+
+bool BotMgr::ProcessBotMechanicReactions(Player* bot, BotSpecRotation const* rotation, Unit* combatTarget,
+    Unit* healTarget)
+{
+    // 1. Gefaehrlichen Bodeneffekt verlassen - hoechste Prioritaet, da Steh'nbleiben potentiell toedlich
+    // ist, waehrend Interrupt/Dispel "nur" DPS/Heilausfall bedeuten. Suchradius bewusst klein gewaehlt
+    // (der Bot steht ja bereits im/nahe am Effekt, wenn dieser ueberhaupt relevant wird).
+    if (DynamicObject* harmfulEffect = FindHarmfulGroundEffectUnderBot(bot, 15.0f))
+    {
+        // Skalierungs-Haertung (Livetest-Fund Runde 7, siehe README-Commands.md/PR - "500+ gleichzeitige
+        // Bots"-Bedenken): ProcessBotMechanicReactions() wird bei aktivem Bodeneffekt JEDEN Kampf-KI-Tick
+        // (alle ~400ms) erneut aufgerufen, solange der Bot noch innerhalb des Suchradius steht - das
+        // navmesh-basierte Herauslaufen dauert aber typischerweise laenger als 400ms. Ohne diese Sperre
+        // wuerde MovePoint() bei jedem Tick erneut ausgeloest (jeweils ein neues SMSG_ON_MONSTER_MOVE),
+        // obwohl der Bot bereits unterwegs ist - unnoetiger Paket-Overhead, der sich bei vielen
+        // gleichzeitig betroffenen Bots summiert. POINT_MOTION_TYPE ist bereits aktiv, waehrend eine
+        // vorherige Ausweichbewegung noch laeuft - dann hier nichts erneut auf den Weg schicken, aber
+        // (Sicherheit vor Sparsamkeit) trotzdem "true" liefern, damit die normale Rotation fuer diesen
+        // Tick weiterhin pausiert, bis der Bot den Effekt tatsaechlich verlassen hat.
+        if (bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+        {
+            // Radial vom Effektzentrum weg, ueber den Wirkradius hinaus (plus Sicherheitsabstand) -
+            // MovePoint(generatePath=true) uebernimmt die eigentliche Navmesh-Route dorthin, damit der
+            // Bot nicht durch Waende/von Klippen "flieht".
+            float angle = harmfulEffect->GetAngle(bot);
+            float distance = harmfulEffect->GetRadius() + 5.0f;
+            float fleeX = harmfulEffect->GetPositionX() + std::cos(angle) * distance;
+            float fleeY = harmfulEffect->GetPositionY() + std::sin(angle) * distance;
+            float fleeZ = harmfulEffect->GetPositionZ();
+            bot->GetMotionMaster()->MovePoint(0, fleeX, fleeY, fleeZ, true);
+
+            TC_LOG_DEBUG("scripts.bots", "BotMgr::ProcessBotMechanicReactions: Bot %s weicht Bodeneffekt "
+                "(Spell %u) aus.", bot->GetGUID().ToString().c_str(), harmfulEffect->GetSpellId());
+        }
+        return true;
+    }
+
+    // 2. Interrupt - nur, wenn die Skillung ueberhaupt eine hat (siehe g_BotSpecRotations) und der
+    // Bot sie bereits erlernt hat/sie einsatzbereit ist. Der Core prueft beim tatsaechlichen Cast von
+    // Spell::EffectInterruptCast() selbst, ob combatTarget gerade unterbrechbar castet - hier reicht
+    // die billige Vorabpruefung "castet ueberhaupt gerade etwas", um unnoetige Fehlversuche zu vermeiden.
+    if (rotation->ResolvedInterruptSpellId && combatTarget)
+    {
+        bool targetIsCasting = combatTarget->GetCurrentSpell(CURRENT_GENERIC_SPELL) != nullptr
+            || combatTarget->GetCurrentSpell(CURRENT_CHANNELED_SPELL) != nullptr;
+
+        if (targetIsCasting && bot->HasSpell(rotation->ResolvedInterruptSpellId))
+        {
+            if (SpellInfo const* interruptInfo = sSpellMgr->GetSpellInfo(rotation->ResolvedInterruptSpellId))
+            {
+                if (bot->GetSpellHistory()->IsReady(interruptInfo)
+                    && bot->GetDistance(combatTarget) <= interruptInfo->GetMaxRange(false, bot)
+                    && bot->IsWithinLOSInMap(combatTarget))
+                {
+                    if (bot->CastSpell(combatTarget, rotation->ResolvedInterruptSpellId, TRIGGERED_NONE))
+                    {
+                        TC_LOG_DEBUG("scripts.bots", "BotMgr::ProcessBotMechanicReactions: Bot %s "
+                            "unterbricht %s (Interrupt-Spell %u).", bot->GetGUID().ToString().c_str(),
+                            combatTarget->GetGUID().ToString().c_str(), rotation->ResolvedInterruptSpellId);
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Dispel - der Core waehlt die zu entfernende Aura selbst aus (Unit::GetDispellableAuraList(),
+    // dieselbe Logik wie Spell::EffectDispel() sie fuer echte Spieler-Dispels nutzt), anhand der
+    // DispelMask des Dispel-Spells selbst (SpellInfo::Dispel-Feld, z.B. "Dispel Magic" -> Magic).
+    if (rotation->ResolvedDispelSpellId && healTarget && bot->HasSpell(rotation->ResolvedDispelSpellId))
+    {
+        if (SpellInfo const* dispelInfo = sSpellMgr->GetSpellInfo(rotation->ResolvedDispelSpellId))
+        {
+            if (bot->GetSpellHistory()->IsReady(dispelInfo)
+                && bot->GetDistance(healTarget) <= dispelInfo->GetMaxRange(false, bot)
+                && bot->IsWithinLOSInMap(healTarget))
+            {
+                DispelChargesList dispelList;
+                healTarget->GetDispellableAuraList(bot, dispelInfo->GetDispelMask(), dispelList);
+                if (!dispelList.empty())
+                {
+                    if (bot->CastSpell(healTarget, rotation->ResolvedDispelSpellId, TRIGGERED_NONE))
+                    {
+                        TC_LOG_DEBUG("scripts.bots", "BotMgr::ProcessBotMechanicReactions: Bot %s "
+                            "dispelt %s (Dispel-Spell %u).", bot->GetGUID().ToString().c_str(),
+                            healTarget->GetGUID().ToString().c_str(), rotation->ResolvedDispelSpellId);
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+// Gemeinsamer Hilfscode fuer BotAcceptQuest()/BotTurnInQuest(): loest questGiverSpawnGuid (DB-Spawn-Id
+// aus der `creature`-Tabelle, dieselbe Konvention wie bei StartBotAttack()/BotLootTarget()) zu einer
+// lebenden Creature* auf demselben Map wie der Bot auf. nullptr bei jedem Fehlschlag, jeweils bereits
+// mit TC_LOG_ERROR protokolliert.
+static Creature* ResolveBotQuestGiver(Player* player, ObjectGuid::LowType questGiverSpawnGuid, char const* callerName)
+{
+    CreatureData const* data = sObjectMgr->GetCreatureData(questGiverSpawnGuid);
+    if (!data)
+    {
+        TC_LOG_ERROR("scripts.bots", "%s: keine Spawn-Daten fuer questGiverSpawnGuid " UI64FMTD " gefunden "
+            "(creature-Tabelle).", callerName, questGiverSpawnGuid);
+        return nullptr;
+    }
+
+    if (data->mapid != player->GetMapId())
+    {
+        TC_LOG_ERROR("scripts.bots", "%s: Questgeber-Spawn " UI64FMTD " ist auf Map %u, Bot steht aber auf Map %u.",
+            callerName, questGiverSpawnGuid, data->mapid, player->GetMapId());
+        return nullptr;
+    }
+
+    Creature* questGiver = nullptr;
+    auto range = player->GetMap()->GetCreatureBySpawnIdStore().equal_range(questGiverSpawnGuid);
+    for (auto rangeItr = range.first; rangeItr != range.second; ++rangeItr)
+    {
+        if (rangeItr->second && rangeItr->second->IsInWorld())
+        {
+            questGiver = rangeItr->second;
+            break;
+        }
+    }
+
+    if (!questGiver)
+        TC_LOG_ERROR("scripts.bots", "%s: Questgeber (Spawn " UI64FMTD ") ist aktuell nicht als lebendes Objekt "
+            "im Grid geladen (zu weit weg/nicht gespawnt).", callerName, questGiverSpawnGuid);
+
+    return questGiver;
+}
+
+bool BotMgr::BotAcceptQuest(uint32 accountId, ObjectGuid::LowType questGiverSpawnGuid, uint32 questId)
+{
+    auto itr = _botSessions.find(accountId);
+    if (itr == _botSessions.end() || !itr->second.Session)
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotAcceptQuest: keine Bot-Session fuer Account %u vorhanden.", accountId);
+        return false;
+    }
+
+    Player* player = itr->second.Session->GetPlayer();
+    if (!player || !player->IsInWorld())
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotAcceptQuest: Account %u hat aktuell keinen Player in der Welt "
+            "(erst '.bottest login' ausfuehren).", accountId);
+        return false;
+    }
+
+    Creature* questGiver = ResolveBotQuestGiver(player, questGiverSpawnGuid, "BotMgr::BotAcceptQuest");
+    if (!questGiver)
+        return false;
+
+    if (!questGiver->hasQuest(questId))
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotAcceptQuest: Account %u - Questgeber '%s' (Spawn " UI64FMTD ") "
+            "bietet Quest %u nicht an.", accountId, questGiver->GetName().c_str(), questGiverSpawnGuid, questId);
+        return false;
+    }
+
+    Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+    if (!quest)
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotAcceptQuest: Account %u - Quest-Id %u existiert nicht in "
+            "quest_template.", accountId, questId);
+        return false;
+    }
+
+    // CanTakeQuest()/CanAddQuest() sind dieselben Pruefungen, die auch
+    // WorldSession::HandleQuestgiverAcceptQuestOpcode() vor AddQuestAndCheckCompletion() aufruft
+    // (Level-/Klassen-/Rassen-/Vorquest-/Ruf-Voraussetzungen, bereits aktiv/erledigt, Tagesquest-
+    // Limit etc.) - msg=true schreibt bei Fehlschlag zusaetzlich eine SendSysMessage-Zeile in
+    // Server.log/an den Bot (null-socket-sicher, siehe Kopfkommentar-Referenz).
+    if (!player->CanTakeQuest(quest, true) || !player->CanAddQuest(quest, true))
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotAcceptQuest: Account %u - CanTakeQuest()/CanAddQuest() fuer Quest "
+            "%u ('%s') lieferte false - Voraussetzungen nicht erfuellt oder Quest bereits aktiv/erledigt.",
+            accountId, questId, quest->GetLogTitle().c_str());
+        return false;
+    }
+
+    // Derselbe Aufruf, den HandleQuestgiverAcceptQuestOpcode() selbst nach den obigen Checks macht
+    // (QuestHandler.cpp) - kein Opcode-/Packet-Nachbau noetig, siehe BotMgr.h-Kopfkommentar.
+    player->AddQuestAndCheckCompletion(quest, questGiver);
+
+    TC_LOG_INFO("scripts.bots", "BotMgr::BotAcceptQuest: Account %u - Quest %u ('%s') von Questgeber '%s' "
+        "(Spawn " UI64FMTD ") angenommen.", accountId, questId, quest->GetLogTitle().c_str(),
+        questGiver->GetName().c_str(), questGiverSpawnGuid);
+    return true;
+}
+
+bool BotMgr::BotTurnInQuest(uint32 accountId, ObjectGuid::LowType questGiverSpawnGuid, uint32 questId,
+    uint32 rewardItemEntry)
+{
+    auto itr = _botSessions.find(accountId);
+    if (itr == _botSessions.end() || !itr->second.Session)
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotTurnInQuest: keine Bot-Session fuer Account %u vorhanden.", accountId);
+        return false;
+    }
+
+    Player* player = itr->second.Session->GetPlayer();
+    if (!player || !player->IsInWorld())
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotTurnInQuest: Account %u hat aktuell keinen Player in der Welt "
+            "(erst '.bottest login' ausfuehren).", accountId);
+        return false;
+    }
+
+    Creature* questGiver = ResolveBotQuestGiver(player, questGiverSpawnGuid, "BotMgr::BotTurnInQuest");
+    if (!questGiver)
+        return false;
+
+    if (!questGiver->hasInvolvedQuest(questId))
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotTurnInQuest: Account %u - Questgeber '%s' (Spawn " UI64FMTD ") "
+            "nimmt Quest %u nicht entgegen.", accountId, questGiver->GetName().c_str(), questGiverSpawnGuid, questId);
+        return false;
+    }
+
+    Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+    if (!quest)
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotTurnInQuest: Account %u - Quest-Id %u existiert nicht in "
+            "quest_template.", accountId, questId);
+        return false;
+    }
+
+    if (player->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE)
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotTurnInQuest: Account %u - Quest %u ('%s') ist noch nicht "
+            "QUEST_STATUS_COMPLETE (aktueller Status %u) - Zielfortschritt zuerst abschliessen.", accountId,
+            questId, quest->GetLogTitle().c_str(), uint32(player->GetQuestStatus(questId)));
+        return false;
+    }
+
+    if (!player->CanRewardQuest(quest, rewardItemEntry, true))
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::BotTurnInQuest: Account %u - CanRewardQuest() fuer Quest %u ('%s') "
+            "mit rewardItemEntry %u lieferte false (ungueltige Belohnungswahl?).", accountId, questId,
+            quest->GetLogTitle().c_str(), rewardItemEntry);
+        return false;
+    }
+
+    // Derselbe Aufruf, den HandleQuestgiverChooseRewardOpcode() selbst nach den obigen Checks macht.
+    player->RewardQuest(quest, rewardItemEntry, questGiver);
+
+    TC_LOG_INFO("scripts.bots", "BotMgr::BotTurnInQuest: Account %u - Quest %u ('%s') bei Questgeber '%s' "
+        "(Spawn " UI64FMTD ") abgegeben, rewardItemEntry %u.", accountId, questId, quest->GetLogTitle().c_str(),
+        questGiver->GetName().c_str(), questGiverSpawnGuid, rewardItemEntry);
+    return true;
+}
+
+int32 BotMgr::GetBotQuestStatus(uint32 accountId, uint32 questId) const
+{
+    Player* player = GetBotPlayer(accountId);
+    if (!player)
+        return -1;
+
+    return int32(player->GetQuestStatus(questId));
+}
+
+namespace
+{
+    // Autonomer Dungeon-Clear-Modus: siehe voller Design-Kommentar bei BotMgr::SetDungeonClearMode()
+    // (BotMgr.h) fuer die Begruendung (Ideenreferenz mod-dungeon-clear, komplett neu gebaut).
+    constexpr uint32 BOT_DUNGEON_CLEAR_TICK_MS = 1000;         // Routing-Entscheidung alle ~1s
+    constexpr float BOT_DUNGEON_CLEAR_TRASH_AGGRO_RADIUS = 15.0f;
+    constexpr float BOT_DUNGEON_CLEAR_LOOT_RADIUS = 10.0f;
+    constexpr float BOT_DUNGEON_CLEAR_ARRIVAL_DISTANCE = 5.0f; // "am Boss angekommen"-Toleranz
+}
+
+Creature* BotMgr::FindNearestLivingDungeonBoss(Player* bot) const
+{
+    Creature* best = nullptr;
+    float bestDist = 0.0f;
+
+    for (auto const& pair : bot->GetMap()->GetCreatureBySpawnIdStore())
+    {
+        Creature* creature = pair.second;
+        if (!creature || !creature->IsInWorld() || !creature->IsAlive() || !creature->IsDungeonBoss())
+            continue;
+
+        float dist = bot->GetDistance(creature);
+        if (!best || dist < bestDist)
+        {
+            best = creature;
+            bestDist = dist;
+        }
+    }
+
+    return best;
+}
+
+Creature* BotMgr::FindNearestAggroableTrash(Player* bot, float radius) const
+{
+    Creature* best = nullptr;
+    float bestDist = radius;
+
+    for (auto const& pair : bot->GetMap()->GetCreatureBySpawnIdStore())
+    {
+        Creature* creature = pair.second;
+        // Dungeon-Bosse werden bewusst ausgeschlossen - die behandelt FindNearestLivingDungeonBoss()
+        // separat, damit ein Boss nicht "nebenbei" wie gewoehnlicher Trash gepullt wird.
+        if (!creature || !creature->IsInWorld() || !creature->IsAlive() || creature->IsDungeonBoss())
+            continue;
+        if (!bot->IsValidAttackTarget(creature))
+            continue;
+
+        float dist = bot->GetDistance(creature);
+        if (dist <= bestDist)
+        {
+            best = creature;
+            bestDist = dist;
+        }
+    }
+
+    return best;
+}
+
+Creature* BotMgr::FindNearestLootableCorpse(Player* bot, float radius) const
+{
+    Creature* best = nullptr;
+    float bestDist = radius;
+
+    for (auto const& pair : bot->GetMap()->GetCreatureBySpawnIdStore())
+    {
+        Creature* creature = pair.second;
+        if (!creature || !creature->IsInWorld() || creature->IsAlive())
+            continue;
+        if (!creature->HasFlag(OBJECT_DYNAMIC_FLAGS, UNIT_DYNFLAG_LOOTABLE))
+            continue;
+
+        float dist = bot->GetDistance(creature);
+        if (dist <= bestDist)
+        {
+            best = creature;
+            bestDist = dist;
+        }
+    }
+
+    return best;
+}
+
+std::vector<std::string> BotMgr::FindNpcSpawnsByName(WorldObject const* center, std::string const& namePart,
+    float radius) const
+{
+    std::vector<std::string> results;
+    if (!center || !center->GetMap() || namePart.empty())
+        return results;
+
+    std::string needle = namePart;
+    std::transform(needle.begin(), needle.end(), needle.begin(), [](unsigned char c) { return std::tolower(c); });
+
+    // Dieselbe bereits mehrfach bestaetigte Quelle wie FindNearestLivingDungeonBoss()/
+    // FindNearestAggroableTrash() oben - GetCreatureBySpawnIdStore() ist nach creature.guid (der
+    // DB-Spawn-Id) indiziert, genau der Wert, den '.bottest attack/loot/questaccept/questturnin'
+    // erwarten. Nur AKTUELL GELADENE Grids werden gefunden - kein direkter SQL-Zugriff, bewusst so
+    // (siehe BotMgr.h-Kommentar bei FindNpcSpawnsByName()).
+    for (auto const& pair : center->GetMap()->GetCreatureBySpawnIdStore())
+    {
+        Creature* creature = pair.second;
+        if (!creature || !creature->IsInWorld())
+            continue;
+
+        std::string name = creature->GetName();
+        std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
+        if (name.find(needle) == std::string::npos)
+            continue;
+
+        float dist = center->GetDistance(creature);
+        if (dist > radius)
+            continue;
+
+        std::ostringstream line;
+        line << "spawnGuid=" << pair.first << " entry=" << creature->GetEntry() << " name='"
+             << creature->GetName() << "' " << (creature->IsAlive() ? "lebt" : "tot") << " dist="
+             << std::fixed << std::setprecision(1) << dist << "y pos=" << creature->GetPosition().ToString();
+        results.push_back(line.str());
+    }
+
+    std::sort(results.begin(), results.end());
+    return results;
+}
+
+std::string BotMgr::DiagnoseSpecRotations() const
+{
+    std::ostringstream out;
+    uint32 specsWithIssues = 0;
+
+    for (BotSpecRotation const& rotation : g_BotSpecRotations)
+    {
+        // GetOrResolveSpecRotation() loest nur EINMAL PRO PROZESS auf (ResolvedOnce-Flag) - ein
+        // erneuter Aufruf hier ist also immer billig, auch wenn diese Diagnose mehrfach laeuft.
+        GetOrResolveSpecRotation(rotation.SpecId);
+
+        std::vector<std::string> failures;
+        for (BotRotationStep const& step : rotation.Priority)
+        {
+            if (!step.ResolvedSpellId)
+                failures.push_back(std::string(step.SpellName) + " (Prioritaetsschritt)");
+            if (step.ConditionAuxSpellName && !step.ResolvedAuxSpellId)
+                failures.push_back(std::string(step.ConditionAuxSpellName) + " (Bedingungs-Aura)");
+        }
+        if (rotation.InterruptSpellName && !rotation.ResolvedInterruptSpellId)
+            failures.push_back(std::string(rotation.InterruptSpellName) + " (Interrupt)");
+        if (rotation.DispelSpellName && !rotation.ResolvedDispelSpellId)
+            failures.push_back(std::string(rotation.DispelSpellName) + " (Dispel)");
+
+        if (failures.empty())
+            continue;
+
+        ++specsWithIssues;
+        out << "specId " << rotation.SpecId << ": " << failures.size() << " ungeloeste(r) Name(n): ";
+        for (size_t i = 0; i < failures.size(); ++i)
+        {
+            if (i)
+                out << ", ";
+            out << failures[i];
+        }
+        out << "\n";
+    }
+
+    if (specsWithIssues == 0)
+        out << "Alle " << g_BotSpecRotations.size() << " Skillungen: saemtliche Faehigkeits-/Aura-/"
+            "Interrupt-/Dispel-Namen erfolgreich gegen das aktuell geladene Spell.db2 aufgeloest.";
+    else
+        out << specsWithIssues << " von " << g_BotSpecRotations.size() << " Skillungen haben mindestens "
+            "einen ungeloesten Namen (siehe oben) - mit '.lookup spell <Name>' pruefen und den Namen im "
+            "betroffenen g_BotSpecRotations-Eintrag in BotMgr.cpp korrigieren.";
+
+    return out.str();
+}
+
+bool BotMgr::SetDungeonClearMode(uint32 accountId, bool enable)
+{
+    auto itr = _botSessions.find(accountId);
+    if (itr == _botSessions.end() || !itr->second.Session)
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::SetDungeonClearMode: keine Bot-Session fuer Account %u vorhanden.",
+            accountId);
+        return false;
+    }
+
+    Player* bot = itr->second.Session->GetPlayer();
+    if (!bot || !bot->IsInWorld())
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::SetDungeonClearMode: Account %u hat aktuell keinen Player in der "
+            "Welt (erst '.bottest login' ausfuehren).", accountId);
+        return false;
+    }
+
+    if (enable && !bot->GetMap()->IsDungeon())
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::SetDungeonClearMode: Account %u steht nicht auf einer Dungeon-Karte "
+            "(Map::IsDungeon()==false) - Modus wird nicht aktiviert (erst per '.bottest teleport' in eine "
+            "Instanz bringen).", accountId);
+        return false;
+    }
+
+    itr->second.DungeonClearActive = enable;
+    itr->second.DungeonClearTickAccumMs = 0;
+
+    TC_LOG_INFO("scripts.bots", "BotMgr::SetDungeonClearMode: Account %u - Dungeon-Clear-Modus %s.", accountId,
+        enable ? "AKTIVIERT" : "deaktiviert");
+    return true;
+}
+
+bool BotMgr::IsDungeonClearModeActive(uint32 accountId) const
+{
+    auto itr = _botSessions.find(accountId);
+    return itr != _botSessions.end() && itr->second.DungeonClearActive;
+}
+
+uint32 BotMgr::GetBotAccountIdByGuid(ObjectGuid guid) const
+{
+    // Siehe BotMgr.h-Kommentar - derselbe lineare Scan/dieselbe Groessenordnung wie IsBotPlayerGuid().
+    for (auto const& [accountId, entry] : _botSessions)
+    {
+        if (entry.Session && entry.Session->GetPlayer() && entry.Session->GetPlayer()->GetGUID() == guid)
+            return accountId;
+    }
+    return 0;
+}
+
+uint32 BotMgr::SetDungeonClearModeForPlayerGroup(Player* requester, bool enable)
+{
+    if (!requester)
+        return 0;
+
+    Group* group = requester->GetGroup();
+    if (!group)
+        return 0;
+
+    uint32 toggledCount = 0;
+    for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+    {
+        Player* member = itr->GetSource();
+        if (!member || !IsBotPlayerGuid(member->GetGUID()))
+            continue;
+
+        uint32 accountId = GetBotAccountIdByGuid(member->GetGUID());
+        if (accountId && SetDungeonClearMode(accountId, enable))
+            ++toggledCount;
+    }
+
+    TC_LOG_INFO("scripts.bots", "BotMgr::SetDungeonClearModeForPlayerGroup: Spieler %s hat den Dungeon-Clear-"
+        "Modus fuer %u Bot(s) der eigenen Gruppe %s.", requester->GetName().c_str(), toggledCount,
+        enable ? "AKTIVIERT" : "deaktiviert");
+    return toggledCount;
+}
+
+uint32 BotMgr::CountActiveDungeonClearBotsInGroup(Player* player) const
+{
+    if (!player)
+        return 0;
+
+    Group* group = player->GetGroup();
+    if (!group)
+        return 0;
+
+    uint32 activeCount = 0;
+    for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+    {
+        Player* member = itr->GetSource();
+        if (!member || !IsBotPlayerGuid(member->GetGUID()))
+            continue;
+
+        uint32 accountId = GetBotAccountIdByGuid(member->GetGUID());
+        if (accountId && IsDungeonClearModeActive(accountId))
+            ++activeCount;
+    }
+    return activeCount;
+}
+
+void BotMgr::ProcessDungeonClear(uint32 accountId, uint32 diff)
+{
+    auto itr = _botSessions.find(accountId);
+    if (itr == _botSessions.end() || !itr->second.Session || !itr->second.DungeonClearActive)
+        return;
+
+    itr->second.DungeonClearTickAccumMs += diff;
+    if (itr->second.DungeonClearTickAccumMs < BOT_DUNGEON_CLEAR_TICK_MS)
+        return;
+    itr->second.DungeonClearTickAccumMs = 0;
+
+    Player* bot = itr->second.Session->GetPlayer();
+    if (!bot || !bot->IsInWorld() || !bot->IsAlive())
+        return;
+
+    // Kampf laeuft bereits (gegen Boss ODER Trash) - ProcessBotCombatAI() bzw. der ganz normale
+    // Auto-Attack-Zyklus uebernehmen, Dungeon-Clear greift erst wieder ein, sobald der Bot nicht mehr
+    // kaempft.
+    if (bot->IsInCombat() || bot->IsNonMeleeSpellCast(false))
+        return;
+
+    if (Creature* corpse = FindNearestLootableCorpse(bot, BOT_DUNGEON_CLEAR_LOOT_RADIUS))
+    {
+        BotLootTarget(accountId, corpse->GetSpawnId());
+        return; // ein Schritt pro Tick - naechster Schritt (Trash/Boss-Suche) beim naechsten Tick
+    }
+
+    // Trash auf dem Weg hat Vorrang vor dem Weiterlaufen zum Boss - "auf dem Weg toeten", nicht dran
+    // vorbeilaufen und im Ruecken stehen lassen.
+    if (Creature* trash = FindNearestAggroableTrash(bot, BOT_DUNGEON_CLEAR_TRASH_AGGRO_RADIUS))
+    {
+        bot->Attack(trash, true);
+        bot->GetMotionMaster()->MoveChase(trash);
+        TC_LOG_INFO("scripts.bots", "BotMgr::ProcessDungeonClear: Account %u engagiert Trash '%s' auf dem Weg "
+            "zum Boss.", accountId, trash->GetName().c_str());
+        return;
+    }
+
+    Creature* boss = FindNearestLivingDungeonBoss(bot);
+    if (!boss)
+    {
+        TC_LOG_INFO("scripts.bots", "BotMgr::ProcessDungeonClear: Account %u - kein lebender Dungeon-Boss mehr "
+            "auf dieser Karte gefunden (Instanz vermutlich clear) - Dungeon-Clear-Modus wird automatisch "
+            "beendet.", accountId);
+        itr->second.DungeonClearActive = false;
+        return;
+    }
+
+    if (bot->GetDistance(boss) <= BOT_DUNGEON_CLEAR_ARRIVAL_DISTANCE)
+    {
+        // Am Boss angekommen, aber (noch) nicht im Kampf (z.B. weil der Encounter erst durch aktives
+        // Angreifen ausgeloest wird) - aktiv angreifen statt daneben stehen zu bleiben.
+        bot->Attack(boss, true);
+        bot->GetMotionMaster()->MoveChase(boss);
+        TC_LOG_INFO("scripts.bots", "BotMgr::ProcessDungeonClear: Account %u am Boss '%s' angekommen, engagiert.",
+            accountId, boss->GetName().c_str());
+        return;
+    }
+
+    // Navmesh-Routing zum naechsten Boss - KEINE Wegpunkte, dieselbe bereits bestaetigte
+    // generatePath=true-Logik wie MoveBotTestStepPath()/Runde U. Nur neu ansetzen, wenn der Bot gerade
+    // NICHT schon unterwegs ist (movespline->Finalized()) - verhindert, dass ein laufender Pfad jede
+    // Sekunde neu berechnet/unterbrochen wird (dieselbe Konvention wie der Patrol-Fortschritt in Tick()).
+    if (bot->movespline->Finalized())
+    {
+        bot->GetMotionMaster()->MovePoint(0, boss->GetPositionX(), boss->GetPositionY(), boss->GetPositionZ(),
+            /*generatePath*/ true);
+        TC_LOG_INFO("scripts.bots", "BotMgr::ProcessDungeonClear: Account %u routet per Navmesh zu Boss '%s' "
+            "(Distanz %.1f).", accountId, boss->GetName().c_str(), bot->GetDistance(boss));
+    }
 }
 
 bool BotMgr::CreateBot(uint32 /*ownerAccountId*/, std::string const& botCharacterName)

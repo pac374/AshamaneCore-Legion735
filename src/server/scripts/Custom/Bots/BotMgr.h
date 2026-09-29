@@ -193,12 +193,108 @@
 #include "ObjectGuid.h"
 #include "BotCharacter.h"
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include <string>
+#include <vector>
 
+class DynamicObject;
+class Group;
 class IBotCharacter;
 class Player;
+class Unit;
+class WorldObject;
 class WorldSession;
+struct SpellInfo;
+
+// --- Kampf-KI (Kampfmechaniken/Rotationen aller Klassen/Skillungen, siehe voller Design-Kommentar
+// bei BotMgr::ProcessBotCombatAI() unten) --------------------------------------------------------
+//
+// Grundproblem, das dieses Design loest: Faehigkeiten-Namen/-Reihenfolgen sind aus Community-
+// Recherche fuer Patch 7.3.5 belegbar, aber NUMERISCHE Spell-IDs sind es nicht zuverlaessig (siehe
+// BotMgr::ResolveSpellIdByName()-Kommentar) - Faehigkeiten wurden zwischen Erweiterungen und sogar
+// innerhalb von Legion mehrfach umgestaltet/umnummeriert. Deshalb sind Rotationen hier ausschliesslich
+// ueber den ENGLISCHEN Faehigkeitsnamen (aus Recherche, siehe BotMgr.cpp-Kommentar bei
+// g_BotSpecRotations) definiert und werden erst zur Laufzeit gegen das tatsaechlich auf DIESEM Server
+// geladene Spell.db2 (Build 26972) aufgeloest - garantiert korrekt fuer genau diese Version, keine
+// geratene ID.
+
+enum class BotRole : uint8
+{
+    Unknown,
+    Tank,
+    Healer,
+    MeleeDps,
+    RangedDps
+};
+
+enum class BotRotationCondition : uint8
+{
+    Always,                  // sofort einsetzen, sobald bereit (typischer Fuellschlag/On-CD-Skill)
+    TargetHealthPctBelow,    // Ziel (Gegner ODER gewaehltes Heilziel, je nach Rolle) unter X% Leben
+    SelfHealthPctBelow,      // eigenes Leben unter X% (Defensiv-CDs/Selbstheilung)
+    ResourceAtLeast,         // eigene Ressource (ConditionAuxPower) >= X
+    AuraMissingOnSelf,       // Buff (ConditionAuxSpellName) NICHT aktiv auf dem Bot selbst
+    AuraPresentOnSelf,       // Buff/Proc (ConditionAuxSpellName) IST aktiv auf dem Bot selbst
+    AuraMissingOnTarget      // Aura (ConditionAuxSpellName, z.B. DoT/HoT) NICHT aktiv auf dem Ziel
+};
+
+// Runde 3: fuer Skillungen, deren Kernmechanik ZWEI verschiedene Ziele pro Rotation braucht (bisher
+// nur Discipline Priest - Atonement heilt ueber Schaden an einem GEGNER, waehrend das eigentliche
+// Heilziel ein VERBUENDETER mit Atonement-Buff ist). Ohne dieses Feld waere das Ziel starr an die
+// Rolle gekoppelt (Heiler->immer Verbuendeter, DPS/Tank->immer Gegner), was fuer Disc strukturell
+// falsch ist. RoleDefault (Standard, alle bisherigen 29 Skillungen nutzen implizit nur diesen Wert)
+// aendert nichts am bestehenden Verhalten.
+enum class BotRotationTargetOverride : uint8
+{
+    RoleDefault,     // wie bisher: Heiler-Rolle -> SelectBotHealTarget(), sonst -> SelectBotCombatTarget()
+    ForceEnemy,      // IMMER der aktuelle Kampf-Gegner, unabhaengig von der Rolle der Skillung
+    ForceHealTarget  // IMMER das per SelectBotHealTarget() gewaehlte Gruppenmitglied
+};
+
+// Ein einzelner Prioritaetseintrag. SpellName ist die recherchierte, patch-7.3.5-genaue Bezeichnung -
+// die einzige "Wahrheitsquelle" in diesem Modul; ResolvedSpellId/ResolvedAuxSpellId werden EINMALIG
+// pro Prozesslauf von BotMgr::GetOrResolveSpecRotation() befuellt (siehe dort) und sind bewusst
+// `mutable`, weil g_BotSpecRotations (BotMgr.cpp) eine statische, unveraenderliche Datentabelle ist,
+// die dennoch verzoegert (lazy) einmalig angereichert werden muss.
+struct BotRotationStep
+{
+    char const* SpellName;
+    BotRotationCondition Condition = BotRotationCondition::Always;
+    float ConditionValue = 0.0f;
+    uint32 ConditionAuxPower = 0;                  // nur fuer ResourceAtLeast (Powers-Enum-Wert)
+    char const* ConditionAuxSpellName = nullptr;    // nur fuer die drei Aura*-Bedingungen
+    BotRotationTargetOverride TargetOverride = BotRotationTargetOverride::RoleDefault;
+    mutable uint32 ResolvedSpellId = 0;
+    mutable uint32 ResolvedAuxSpellId = 0;
+};
+
+// Eine vollstaendige Rotationstabelle fuer EINE Spezialisierung (ChrSpecialization-Id, dieselbe
+// Nummerierung wie bereits in BotMgr::GetArtifactItemForSpec()/GetDefaultSpecForClass() verwendet -
+// siehe dort, Runde 143). Bewusst als flache, von oben nach unten ausgewertete Prioritaetsliste
+// (kein Verhaltensbaum) - der erste Schritt, dessen Bedingung UND Ressourcen/Cooldown/Reichweite
+// passen, wird gecastet, danach kehrt ProcessBotCombatAI() fuer diesen Tick zurueck (max. 1 Zauber
+// pro Tick, da alle Schritte dieselbe GCD-Ressource teilen - siehe dortiger Kommentar).
+struct BotSpecRotation
+{
+    uint32 SpecId = 0;
+    uint32 SpellFamily = 0;          // SpellFamilyNames-Enum-Wert, filtert Namenskollisionen zwischen Klassen
+    BotRole Role = BotRole::Unknown;
+    std::vector<BotRotationStep> Priority;
+
+    // Generische Boss-Mechanik-Reaktionen (siehe voller Design-Kommentar bei
+    // BotMgr::ProcessBotMechanicReactions() unten) - spec-weit statt pro Prioritaetsschritt, weil
+    // Interrupt/Dispel keine normalen Rotationsschritte sind (kein "Ziel je nach Rolle", kein
+    // GCD-Slot-Wettbewerb mit der eigentlichen Rotation - sie werden VOR der Rotation geprueft und
+    // preemptieren sie fuer den aktuellen Tick). Beide optional (nullptr = diese Skillung hat
+    // keine/wird in dieser Runde nicht dafuer verdrahtet).
+    char const* InterruptSpellName = nullptr;
+    char const* DispelSpellName = nullptr;
+
+    mutable bool ResolvedOnce = false;
+    mutable uint32 ResolvedInterruptSpellId = 0;
+    mutable uint32 ResolvedDispelSpellId = 0;
+};
 
 class TC_GAME_API BotMgr
 {
@@ -735,6 +831,234 @@ public:
     // architektonisch nicht vorhanden (kein Scope-Verlust gegenueber dem Core).
     bool SkillBotArtifact(uint32 botAccountId, uint32 levelBudget);
 
+    // --- Gruppe Stufe 2, Teil A (LFG-Pool-Matchmaking) nach Design lcf2r138 -------------------------
+    //
+    // Voller Design-Bericht: C:\LegionServer\reports\lcf2r138_2026-09-28_playerbots_gruppe_stufe2_lfg_artefakt_design.md
+    // (Abschnitt "Teil A"). Umsetzung folgt der dort empfohlenen Architektur ("Kern-Pfad wiederverwenden,
+    // kein Bot-Sonderweg"): ein Fuell-Bot wird SOLO (ohne eigene Gruppe) exakt wie ein echter
+    // Solo-Spieler per LFGMgr::JoinLfg() in die bestehende, bereits produktive Queue eingereiht -
+    // LFGQueue::FindGroups()/CheckCompatibility() und LFGMgr::MakeNewGroup() (Group::AddMember(), siehe
+    // Kopfkommentar-Referenz "LFGMgr::JoinLfg() -> ... -> Group::AddMember()") bleiben UNVERAENDERT und
+    // matchen den Bot ganz normal zusammen mit echten Spielern. Level-/Ilvl-Passung passiert dadurch
+    // KOSTENLOS ueber den bereits vorhandenen Lock-Check LFGMgr::GetCompatibleDungeons() (prueft
+    // LFGDungeonData::minlevel/maxlevel/requiredItemLevel gegen Player::getLevel()/
+    // GetAverageItemLevelEquipped() - funktioniert transparent fuer einen Bot, weil er ein echter
+    // Player mit echten, aus dem Equipment-Pool (Runde 135) ausgeruesteten Items ist) - JoinLfg()
+    // schlaegt fuer einen ungeeigneten Bot lediglich sauber fehl (dungeons.empty() -> LFG_JOIN_*-
+    // Fehlercode, sendet nur ein fuer Bots ohnehin socket-sicheres Ergebnis-Paket, keine Mutation),
+    // KEIN eigener Level-/Ilvl-Vorab-Check in BotMgr noetig oder sinnvoll (waere Logikduplizierung).
+    //
+    // Nur drei nachtraeglich noetige, rein additive Erweiterungen im LFG-Kern selbst (siehe
+    // LFGQueue::GetQueueDataStore() und LFGMgr::GetQueuesForTeam()/GetProposalId() - alle rein lesend,
+    // kein bestehender Aufrufpfad geaendert): der Kern hatte bisher keinen Weg, von AUSSEN (ausserhalb
+    // von LFGMgr/LFGQueue selbst) festzustellen, WER gerade wartet und WORAUF eine laufende Proposal
+    // von einem Spieler ohne Client (kein CMSG_LFG_PROPOSAL_RESULT-Antwortpfad) wartet.
+    //
+    // Lazy-Nachfuell-Trigger (Auftragsvorgabe, Skalierungsrisiko bei 500+ Bots vermeiden): KEINE
+    // Dauer-Queue (Bots stehen NICHT permanent in der LFG-Queue). Stattdessen prueft
+    // ProcessLfgPoolFillTick() periodisch (siehe LFG_POOL_FILL_INTERVAL_MS in der .cpp) ALLE aktiven
+    // Queues beider Fraktionen auf Kandidaten mit MINDESTENS EINEM echten (Nicht-Bot-)Mitglied, die
+    // entweder laenger als LFG_POOL_FILL_WAIT_THRESHOLD_SECONDS warten ODER denen eine per
+    // LFGMgr::GetRoleCountByQueueId() als Pflicht markierte Rolle (Tank/Heiler) komplett fehlt - und
+    // reiht dafuer HOECHSTENS EINEN passenden, aktuell untaetigen Bot pro Tick ein (kein
+    // Massen-Einreihen, keine Dauerlast). Bot/Spieler-Unterscheidung ueber IsBotPlayerGuid() (siehe
+    // dort) - laut Aufgabenstellung nur zulaessig, wenn zuverlaessig moeglich; siehe dortige
+    // Begruendung, warum das hier zutrifft (kein Fallback auf "nur eigener Account" noetig).
+    //
+    // Trigger-Scope (Auftragsvorgabe): serverweit fuer ALLE echten Spieler beider Fraktionen, nicht nur
+    // fuer einen einzelnen Account - siehe IsBotPlayerGuid()-Begruendung.
+    void ProcessLfgPoolFillTick(uint32 diff);
+
+    // Manueller Einzelschritt (fuer '.bottest lfgfill' und inkrementelles Live-Testen, unabhaengig vom
+    // Timer in ProcessLfgPoolFillTick()): stoesst GENAU EINEN Nachfuell-Versuch ueber alle Queues
+    // beider Fraktionen an. Rueckgabe true, wenn dabei ein Bot per JoinLfg() eingereiht wurde.
+    bool TriggerLfgPoolFillOnce();
+
+    // Fortschritt eines bereits als Fueller aktiven Bots (Proposal automatisch annehmen, da kein
+    // Client existiert, der SMSG_LFG_PROPOSAL_UPDATE beantworten wuerde; Kartenwechsel-Ack
+    // nachreichen, siehe TeleportBot()/Runde 93) - wird aus Tick() fuer JEDEN aktuell als Fueller
+    // getrackten Bot aufgerufen, NICHT als eigener GM-Befehl (rein interne Fortsetzungslogik,
+    // analog zum Patrol-Fortschritt in Tick()).
+    void AdvanceLfgFillerBots();
+
+    // Zuverlaessige Bot/Spieler-Unterscheidung (Auftragsvorgabe: server-weiter Trigger nur zulaessig,
+    // "wenn das System echte Spieler zuverlaessig von Bots unterscheiden kann"). _botSessions (siehe
+    // unten) ist die EINZIGE autoritative Quelle dafuer, welche Accounts/Player-Objekte Bots sind -
+    // anders als eine Account-Id-Bereichs-Heuristik (die bei manuell angelegten/importierten Accounts
+    // falsch liegen koennte) ist dies der Speicher, den BotMgr selbst beim Anlegen/Einloggen jedes
+    // Bots pflegt (CreateBotAccount()/RequestBotLogin()) - ein echter Spieler-Account landet nie darin.
+    // Deshalb ist der in der Aufgabenstellung vorgesehene Fallback ("nur der eigene Account des
+    // Betreibers") hier NICHT noetig; der Trigger wirkt serverweit fuer alle echten Spieler.
+    // Implementierung: linearer Scan ueber _botSessions (Bot-Anzahl laut Aufgabenstellung bis
+    // ~500 - unkritisch fuer einen alle paar Sekunden laufenden Tick, siehe LFG_POOL_FILL_INTERVAL_MS).
+    bool IsBotPlayerGuid(ObjectGuid guid) const;
+
+    // --- Kampf-KI (Kampfmechaniken fuer alle Klassen/Skillungen) - erste Runde ------------------------
+    //
+    // Ziel laut Auftrag: Faehigkeiten-Nutzung/Rotationen fuer DPS/Heiler/Tank, aber NUR mit Daten, die
+    // fuer genau Patch 7.3.5 (Build 26972) recherchiert und belegt sind - siehe ausfuehrlichen
+    // Design-Kommentar oben bei BotRotationStep/BotSpecRotation sowie bei ResolveSpellIdByName() und
+    // g_BotSpecRotations (BotMgr.cpp) fuer die Quellenlage.
+    //
+    // Umfang: ALLE 36 Skillungen haben einen Eintrag in g_BotSpecRotations (BotMgr.cpp), ueber vier
+    // Runden aufgebaut (siehe voller Kommentar dort fuer Quelle/Konfidenz je Skillung):
+    //   - Runde 1: vier Pilot-Skillungen, je eine pro Rollen-Archetyp (Protection Warrior/Tank,
+    //     Fury Warrior/Nahkampf-DPS, Frost Mage/Fernkampf-DPS, Restoration Shaman/Heiler).
+    //   - Runde 2: 25 weitere auf Basis derselben Recherche (reine Dateneingabe).
+    //   - Runde 3: vier zuvor ausgeschlossene Skillungen ueber die neue BotRotationTargetOverride-
+    //     Erweiterung bzw. dokumentierte Vereinfachungen geloest (Discipline Priest, Brewmaster/
+    //     Windwalker Monk, Demonology Warlock - letzterer mit NIEDRIGER Recherche-Konfidenz).
+    //   - Runde 4: die letzten drei (Enhancement Shaman, Feral/Guardian Druid) nach gezielter
+    //     Zusatzrecherche ergaenzt.
+    // Trotz vollstaendiger Abdeckung bleiben pro Skillung dokumentierte Vereinfachungen bestehen (siehe
+    // Kommentar je Tabelleneintrag) - "verdrahtet" bedeutet NICHT "perfekt bis ins Detail", sondern
+    // "strukturell korrekt mit klar benannten Einschraenkungen". Sollte eine zukuenftige Skillung
+    // dennoch fehlen (z.B. neue ChrSpecialization), liefert GetOrResolveSpecRotation() nullptr und
+    // ProcessBotCombatAI() tut in diesem Fall NICHTS zusaetzlich (der Bot bleibt beim bereits
+    // bestehenden reinen Nahkampf-Auto-Attack-Verhalten aus StartBotAttack(), falls per GM-Befehl
+    // ausgeloest) - kein Absturz, kein falsches Verhalten, einfach "noch nicht implementiert".
+    //
+    // Wird pro eingeloggtem Bot alle ~400ms aus Tick() aufgerufen (eigener Akkumulator
+    // CombatAiTickAccumMs in BotSessionEntry, analog IdleTickAccumMs/PatrolCyclesRemaining). Schliesst
+    // nebenbei einen Teil der im README dokumentierten Luecke "kein autonomer Zustandsautomat": ein
+    // Bot in einer Gruppe engagiert automatisch dasselbe Ziel wie ein bereits kaempfendes
+    // Gruppenmitglied (siehe SelectBotCombatTarget()), ohne dass '.bottest attack' manuell fuer jeden
+    // einzelnen Kampf noetig waere - '.bottest attack' bleibt fuer gezielte Einzeltests weiterhin
+    // nutzbar und unveraendert.
+    void ProcessBotCombatAI(uint32 accountId, uint32 diff);
+
+    // Fuer '.bottest status'/Diagnose: aktuell erkannte Rolle des Bots (Unknown, falls die
+    // Primaerspezialisierung noch keinen Eintrag in g_BotSpecRotations hat).
+    BotRole GetBotRole(uint32 accountId) const;
+
+    // --- Quest-KI, Teil 1 (Annahme/Fortschritt/Abgabe) -------------------------------------------
+    //
+    // Umfang dieser ersten Runde (README-Luecke "Quest-KI noch nicht begonnen" teilweise geschlossen):
+    // die serverseitige Annahme-/Abgabe-Mechanik, DIREKT ueber dieselben oeffentlichen Player-Methoden
+    // aufgerufen, die auch WorldSession::HandleQuestgiverAcceptQuestOpcode()/
+    // HandleQuestgiverChooseRewardOpcode() (QuestHandler.cpp) intern nutzen - passend zum bereits
+    // etablierten Direktaufruf-Muster dieses Moduls (kein Opcode-/Packet-Nachbau noetig, anders als
+    // z.B. bei BotLootTarget() in Runde 129, weil Player::AddQuestAndCheckCompletion()/RewardQuest()
+    // bereits die vollstaendige serverseitige Arbeit sind, die der Opcode-Handler selbst aufruft).
+    //
+    // BEWUSST NICHT Teil dieser Runde (naechste Ausbaustufe): eigenstaendige Entscheidung, WELCHE
+    // Quest angenommen wird, und autonome Navigation zum Questgeber/Questziel (Wegfindung ueber
+    // mehrere Zonen) - das ist der groessere, im README separat als "kein autonomer Zustandsautomat"
+    // dokumentierte Punkt. Toetungsfortschritt fuer Kill-Quest-Ziele braucht dagegen KEINEN
+    // zusaetzlichen Code: der Core vergibt Quest-Kill-Credit ueber die normale, rollenunabhaengige
+    // KillRewarder-Logik an JEDEN an einem Kill beteiligten Player - sobald ein Bot per
+    // StartBotAttack()/ProcessBotCombatAI() aktiv am Kill mitwirkt, laeuft Kill-Credit automatisch mit,
+    // exakt wie bei einem echten Spieler.
+    //
+    // questGiverSpawnGuid ist wie bei StartBotAttack()/BotLootTarget() die DB-Spawn-Id aus der
+    // `creature`-Tabelle (Spalte "guid"), NICHT die Laufzeit-ObjectGuid - dieselbe
+    // Map::GetCreatureBySpawnIdStore()-Aufloesung wird wiederverwendet.
+    bool BotAcceptQuest(uint32 accountId, ObjectGuid::LowType questGiverSpawnGuid, uint32 questId);
+
+    // Gegenstueck: Abgabe/Belohnung. rewardItemEntry ist der ECHTE Item-Entry der gewaehlten
+    // Belohnung (nicht ein Belohnungs-Slot-Index) - siehe WorldPackets::Quest::QuestGiverChooseReward.
+    // 0 ist gueltig fuer Quests ohne Auswahl-Belohnung.
+    bool BotTurnInQuest(uint32 accountId, ObjectGuid::LowType questGiverSpawnGuid, uint32 questId,
+        uint32 rewardItemEntry);
+
+    // Fuer '.bottest queststatus'/Diagnose und fuer eine spaetere autonome Schleife ("ist dieses
+    // Questziel schon fertig?"): liefert den rohen QuestStatus-Enum-Wert als int32 (QUEST_STATUS_NONE/
+    // INCOMPLETE/COMPLETE/FAILED/...), ohne dass Aufrufer aus bot_commandscript.cpp QuestDef.h
+    // einbinden muessen.
+    int32 GetBotQuestStatus(uint32 accountId, uint32 questId) const;
+
+    // --- Autonomer Dungeon-Clear-Modus (Ideenreferenz mod-dungeon-clear, komplett neu gebaut - siehe
+    // README Abschnitt e) fuer die Lizenz-/Kompatibilitaets-Begruendung: AGPL-3.0 + andere Core-Version,
+    // deshalb keine Codezeile uebernommen, nur das Feature-Konzept) --------------------------------------
+    //
+    // Uebernommene Kernidee: Routen werden LIVE aus dem Navmesh generiert
+    // (`MotionMaster::MovePoint(generatePath=true)`, seit Runde U/`MoveBotTestStepPath()` bestaetigt
+    // funktionsfaehig) - KEINE handgepflegten Wegpunkte pro Dungeon. Ein Bot mit aktiviertem Modus
+    // navigiert autonom zum naechsten lebenden Dungeon-Boss (`Creature::IsDungeonBoss()` - dynamisch aus
+    // der `instance_encounters`-Tabelle gesetztes `flags_extra`-Bit, zuverlaessiger als
+    // `CreatureTemplate::rank`, das bei 5-Mann-Bossen haeufig nur `ELITE`/`RAREELITE` ist), engagiert
+    // dabei automatisch Trash in Aggro-Reichweite (dieselbe `Attack()+MoveChase()`-Logik wie
+    // `StartBotAttack()`) und loest nach jedem Kill automatisch `BotLootTarget()` fuer die naechste
+    // lootbare Leiche aus, bevor er weiterroutet.
+    //
+    // BEWUSST NICHT Teil dieser ersten Runde (siehe README-Roadmap fuer die vollstaendige Liste, jeweils
+    // mit Begruendung): Boss-Mechanik-Ausweichen, Pull-Stile (Leeroy/Advanced/Dynamic), Dungeon-
+    // Encounter-Skripte (Hebel/Altare/Eskorten/Wellen), Heiler-Positionierung waehrend des Kampfes,
+    // Tod-Wiederbelebungs-Choreographie bei Gruppenwipes. Jeder Bot routet ausserdem UNABHAENGIG - kein
+    // "ein Bot fuehrt, der Rest folgt"-Konzept wie im Referenzmodul; da die Routenwahl deterministisch
+    // ("naechster lebender Boss") ist, konvergieren mehrere gleichzeitig aktive Bots derselben Gruppe in
+    // der Praxis trotzdem auf denselben Pfad, aber das ist eine bewusste Vereinfachung, keine echte
+    // Formations-/Fuehrungslogik.
+    //
+    // Nur auf Dungeon-Karten aktivierbar (`Map::IsDungeon()`) - auf offenen Weltkarten gaebe es keine
+    // sinnvolle "naechster Boss"-Zielsuche (Weltbosse sind bewusst ausgeschlossen, siehe
+    // `Creature::IsDungeonBoss()`-Definition). Deaktiviert sich automatisch, sobald kein lebender
+    // Dungeon-Boss mehr auf der aktuellen Karte gefunden wird (Instanz vermutlich clear).
+    bool SetDungeonClearMode(uint32 accountId, bool enable);
+    bool IsDungeonClearModeActive(uint32 accountId) const;
+
+    // --- Spieler-Steuerung fuer den Dungeon-Clear-Modus (Chat-Schluesselwoerter + Addon-Kanal, siehe
+    // bot_dungeonclear_control.cpp und README Abschnitt e)/mod-dungeon-clear-addon-Ideenreferenz) -----
+    //
+    // Bisher war SetDungeonClearMode() nur ueber den GM-Befehl '.bottest dungeonclear' erreichbar
+    // (RBAC_PERM_COMMAND_ACCOUNT_CREATE) - fuer eine echte Spielernutzung (Chat-Schluesselwort "dc on"
+    // in der eigenen Gruppe, oder ueber ein Addon) braucht es einen Weg, der KEINE GM-Rechte
+    // voraussetzt und automatisch alle Bot-Mitglieder der GRUPPE DES ANFRAGENDEN SPIELERS behandelt,
+    // nicht eine einzelne accountId. Diese drei Methoden sind die gemeinsame Grundlage fuer beide
+    // Steuerwege (Chat-Schluesselwort UND Addon-Nachricht), damit die eigentliche Umschalt-Logik nur
+    // einmal existiert.
+
+    // Reverse-Lookup fuer eine Laufzeit-ObjectGuid -> Bot-Account-Id (0, falls guid kein Bot ist).
+    // Linearer Scan ueber _botSessions, dieselbe Begruendung/Groessenordnung wie IsBotPlayerGuid().
+    uint32 GetBotAccountIdByGuid(ObjectGuid guid) const;
+
+    // Schaltet den Dungeon-Clear-Modus fuer ALLE Bot-Mitglieder der aktuellen Gruppe von "requester"
+    // (ein echter Spieler ODER ein anderer Bot - keine GM-Pruefung hier, das ist bewusst: jedes
+    // Gruppenmitglied darf die Bots der EIGENEN Gruppe steuern, dieselbe Berechtigungsgrenze wie ein
+    // normaler Party-Invite/-Kick). Liefert die Anzahl tatsaechlich umgeschalteter Bots (0, falls
+    // requester in keiner Gruppe ist oder keine Bots in der Gruppe sind, oder falls SetDungeonClearMode()
+    // fuer jeden einzelnen Bot fehlschlaegt, z.B. weil keiner von ihnen auf einer Dungeon-Karte steht).
+    uint32 SetDungeonClearModeForPlayerGroup(Player* requester, bool enable);
+
+    // Fuer die Addon-"STATUS"-Abfrage: Anzahl der Bot-Mitglieder in der Gruppe von "player", die
+    // GERADE JETZT IsDungeonClearModeActive()==true haben.
+    uint32 CountActiveDungeonClearBotsInGroup(Player* player) const;
+
+    // --- Aktive Selbstdiagnose (Nutzer-Feedback "suche aktiv nach Fehlern und fehlenden Werten") ------
+    //
+    // Zwei konkrete, wiederkehrende Reibungspunkte beim Livetest/Betrieb dieses Moduls, die bisher
+    // manuelles SQL-Nachschlagen bzw. "36 Bots einzeln einloggen und Server.log lesen" erforderten:
+    //
+    //   1. Mehrere '.bottest'-Befehle (attack/loot/questaccept/questturnin) brauchen die DB-Spawn-Id
+    //      (creature.guid) eines Ziel-NPCs - "NPC-Positionen fehlen" ist damit ein wiederkehrendes
+    //      Problem, wenn diese Id nicht bekannt ist. FindNpcSpawnsByName() loest genau das: durchsucht
+    //      die BEREITS GELADENEN Grid-Kreaturen um eine gegebene Position herum nach einem
+    //      Namens-Teilstring und liefert Spawn-Id+Position+Distanz je Treffer zurueck - kein SQL-Zugriff
+    //      noetig, funktioniert nur fuer Kreaturen, deren Grid gerade aktiv ist (derselbe Radius-/
+    //      Sichtbarkeits-Rahmen wie bei FindNearestAggroableTrash() oben).
+    //   2. Ob eine der 36 Skillungs-Rotationen (g_BotSpecRotations, siehe BotMgr.cpp) tatsaechlich
+    //      gegen DIESES Server-Build (26972) aufloest, war bisher nur sichtbar, wenn ein Bot mit genau
+    //      dieser Skillung im Kampf war (TC_LOG_ERROR bei fehlgeschlagener ResolveSpellIdByName()).
+    //      DiagnoseSpecRotations() erzwingt die Aufloesung ALLER 36 Eintraege auf einen Schlag (rein
+    //      lesend, derselbe ResolveSpellIdByName()-Pfad, den auch ein echter Kampf-Tick nutzen wuerde)
+    //      und meldet jeden Namen, der NICHT im aktuell geladenen Spell.db2 gefunden wurde - deckt z.B.
+    //      falsch geratene Brewmaster-Stagger-Aura-Namen oder die als NIEDRIG-Konfidenz markierte
+    //      Demonology-Warlock-Zeile auf, ohne dafuer 36 verschiedene Bots anlegen/ausruesten zu muessen.
+
+    // Kreaturen (lebend ODER tot) innerhalb radius Yards um center, deren Name (creature_template.name,
+    // aktuelle Client-Locale) namePart als Teilstring (case-insensitiv) enthaelt - liefert je Treffer
+    // die DB-Spawn-Id (creature.guid, fuer '.bottest attack/loot/questaccept/questturnin'), Entry,
+    // Distanz und Position als formatierte Zeile. Leerer Vektor, falls nichts (mehr) im geladenen Grid
+    // steht oder kein Treffer passt.
+    std::vector<std::string> FindNpcSpawnsByName(WorldObject const* center, std::string const& namePart,
+        float radius) const;
+
+    // Erzwingt die einmalige Aufloesung ALLER g_BotSpecRotations-Eintraege (nicht nur der bereits per
+    // echtem Bot-Kampf beruehrten) und liefert einen mehrzeiligen Bericht ueber jede Skillung mit
+    // mindestens einem gegen das aktuelle Spell.db2 NICHT aufloesbaren Faehigkeits-/Aura-/Interrupt-/
+    // Dispel-Namen. Rein lesend, ergebnisstabil (derselbe Cache wie im normalen Kampf-KI-Betrieb).
+    std::string DiagnoseSpecRotations() const;
+
     // --- Hooks, die bereits jetzt gefahrlos verdrahtet werden koennen ------
     //
     // Werden aus PlayerScript-Hooks (bot_scriptloader.cpp) fuer JEDEN
@@ -751,6 +1075,98 @@ private:
     // Runde 135: liest/erstellt die dauerhaft fixe Pool-Qualitaetsstufe eines Bots
     // (characters.bot_gear_tier) - siehe .cpp fuer Details.
     uint8 GetOrAssignBotGearTier(Player* player);
+
+    // Kampf-KI (siehe ProcessBotCombatAI()-Kommentar oben): loest einen recherchierten englischen
+    // Faehigkeitsnamen (Patch 7.3.5) zur Laufzeit gegen das tatsaechlich geladene Spell.db2 dieses
+    // Servers auf - siehe voller Begruendung in der .cpp. Exaktes, case-insensitives Namens-Match,
+    // gefiltert auf spellFamily (SpellFamilyNames-Enum), damit gleichnamige Faehigkeiten anderer
+    // Klassen keine Kollision verursachen. Rein lesend, Ergebnis wird prozessweit gecacht.
+    uint32 ResolveSpellIdByName(std::string const& englishName, uint32 spellFamily) const;
+
+    // Liefert die (statische) Rotationstabelle fuer eine ChrSpecialization-Id, oder nullptr, falls
+    // diese Spec noch keinen Eintrag in g_BotSpecRotations hat (siehe BotMgr.cpp). Loest beim ERSTEN
+    // Aufruf fuer eine gegebene Tabelle alle SpellName/ConditionAuxSpellName-Eintraege einmalig per
+    // ResolveSpellIdByName() auf (BotSpecRotation::ResolvedOnce-Flag) - kein wiederholtes Scannen des
+    // gesamten Spell.db2 pro Kampf-Tick.
+    BotSpecRotation const* GetOrResolveSpecRotation(uint32 specId) const;
+
+    // Wertet eine einzelne BotRotationStep-Bedingung gegen den aktuellen Bot-/Zielzustand aus - siehe
+    // BotRotationCondition-Kommentar in BotMgr.h fuer die Bedeutung jedes Falls.
+    bool EvaluateBotRotationCondition(Player* player, Unit* target, BotRotationStep const& step) const;
+
+    // Zielauswahl fuer DPS/Tank-Rollen: eigenes aktuelles Kampfziel, sonst (falls in einer Gruppe) das
+    // Ziel eines bereits kaempfenden Gruppenmitglieds - engagiert den Bot in letzterem Fall automatisch
+    // mit (Attack()+MoveChase(), dieselbe Logik wie StartBotAttack()) statt nur zuzusehen. Liefert
+    // nullptr, wenn aktuell niemand in der Gruppe kaempft.
+    Unit* SelectBotCombatTarget(Player* bot) const;
+
+    // Zielauswahl fuer Heiler-Rollen: das Gruppenmitglied (inkl. des Bots selbst) mit dem niedrigsten
+    // Lebensprozentsatz, aber NUR wenn dieser unter BOT_HEAL_CONSIDER_THRESHOLD_PCT liegt - liefert
+    // sonst nullptr (bewusst kein Fuellschaden/-heilung ohne Bedarf in dieser ersten Runde).
+    Unit* SelectBotHealTarget(Player* bot) const;
+
+    // Dungeon-Clear-Modus (siehe SetDungeonClearMode()-Kommentar oben): wird pro Bot mit aktiviertem
+    // Modus alle ~1s aus Tick() aufgerufen (eigener Akkumulator DungeonClearTickAccumMs in
+    // BotSessionEntry). Tut nichts, waehrend der Bot bereits im Kampf ist (ProcessBotCombatAI()
+    // uebernimmt), sonst: lootbare Leiche in der Naehe? loten. Sonst: Trash in Aggro-Reichweite? mit
+    // engagieren. Sonst: naechster lebender Dungeon-Boss noch zu weit weg? per Navmesh dorthin routen.
+    // Kein lebender Boss mehr gefunden -> Modus automatisch beenden (Instanz vermutlich clear).
+    void ProcessDungeonClear(uint32 accountId, uint32 diff);
+
+    // Naechster lebender Dungeon-Boss auf der aktuellen Karte des Bots (Creature::IsDungeonBoss()), oder
+    // nullptr, falls keiner mehr lebt - lineare Suche ueber Map::GetCreatureBySpawnIdStore() (derselbe
+    // bereits mehrfach genutzte Container wie in StartBotAttack()/BotLootTarget(), hier aber ueber ALLE
+    // Werte statt eines einzelnen equal_range()-Schluessels iteriert, weil das Ziel nicht vorher bekannt
+    // ist) - unkritisch, da ein einzelner Dungeon typischerweise nur wenige hundert Kreaturen gleichzeitig
+    // geladen hat und diese Suche nur alle ~1s pro aktivem Bot laeuft.
+    Creature* FindNearestLivingDungeonBoss(Player* bot) const;
+
+    // Naechste angreifbare Nicht-Boss-Kreatur (Trash) innerhalb radius Yards - Unit::IsValidAttackTarget()
+    // uebernimmt Hostilitaets-/CC-/Sichtbarkeits-Pruefung (dieselbe Kern-API, die auch der reguraere
+    // Client-Zielwahl-Pfad nutzt), Dungeon-Bosse werden hier bewusst ausgeschlossen (die behandelt
+    // FindNearestLivingDungeonBoss() separat, damit ein Boss nicht "nebenbei" wie Trash gepullt wird).
+    Creature* FindNearestAggroableTrash(Player* bot, float radius) const;
+
+    // Naechste lootbare (bereits tote, UNIT_DYNFLAG_LOOTABLE) Leiche innerhalb radius Yards - genutzt, um
+    // nach einem Kill automatisch BotLootTarget() aufzurufen, bevor zum naechsten Ziel weitergeroutet wird.
+    Creature* FindNearestLootableCorpse(Player* bot, float radius) const;
+
+    // --- Generische Boss-Mechanik-Reaktionen (Ideenreferenz: Nutzer-Feedback "Bots brauchen Wissen
+    // ueber Boss-Mechaniken, sonst haben sie keine Ahnung was zu tun ist") ----------------------------
+    //
+    // Kernproblem: Legion-Dungeon-Boss-Mechaniken sind NICHT recherchiert (siehe README-Roadmap) - eine
+    // Wissensdatenbank "Boss X macht bei Y% Mechanik Z, weiche nach Sueden aus" existiert nicht und
+    // waere ein eigenes, sehr grosses Rechercheprojekt pro Dungeon/Boss. Diese Runde loest stattdessen
+    // das, was OHNE Boss-spezifische Daten bereits generisch aus dem Core herleitbar ist (per
+    // Recherche bestaetigt, siehe BotMgr.cpp-Kommentar bei ProcessBotMechanicReactions()):
+    //   1. Gefaehrliche Bodeneffekte verlassen (jede persistente Flaechen-Aura, nicht nur bekannte) -
+    //      DynamicObject::GetSpellInfo()->IsPositive()==false + Bot steht innerhalb GetRadius().
+    //   2. Gegnerische Zauber unterbrechen, wenn die Skillung einen Interrupt hat - der Core prueft
+    //      beim Cast der Interrupt-Faehigkeit selbst, ob das Ziel gerade unterbrechbar castet
+    //      (Spell::EffectInterruptCast()) - der Bot muss nur "casted das Ziel gerade ueberhaupt etwas"
+    //      pruefen und dann draufhalten, kein Fehlversuch-Risiko.
+    //   3. Gefaehrliche, entfernbare Debuffs von sich/Gruppenmitgliedern dispellen, wenn die Skillung
+    //      einen Dispel hat - der Core waehlt die zu entfernende Aura selbst aus
+    //      (Unit::GetDispellableAuraList()/Spell::EffectDispel()).
+    // Das ist AUSDRUECKLICH KEIN Ersatz fuer echtes Boss-Mechanik-Skripting (Ausweich-Positionen, Soak-
+    // Mechaniken, Phasenwechsel, Adds-Prioritaet etc. bleiben unbehandelt, da dafuer eine Boss-genaue
+    // Wissensbasis noetig waere) - es ist die generische Teilmenge, die jeder Encounter (in JEDER
+    // Instanz, nicht nur Legion-Dungeons) gemeinsam hat.
+
+    // Wird von ProcessBotCombatAI() VOR der eigentlichen Rotationsschleife aufgerufen (siehe dort) -
+    // liefert true, wenn eine Mechanik-Reaktion diesen Tick bereits "verbraucht" hat (Interrupt/Dispel
+    // gecastet ODER eine Fluchtbewegung ausgeloest), die normale Rotation wird dann fuer diesen Tick
+    // uebersprungen (Sicherheit vor Schadensoutput).
+    bool ProcessBotMechanicReactions(Player* bot, BotSpecRotation const* rotation, Unit* combatTarget,
+        Unit* healTarget);
+
+    // Naechstes DynamicObject (persistente Flaechen-Aura) innerhalb radius Yards, dessen Zauber laut
+    // SpellInfo::IsPositive() SCHAEDLICH ist UND in dessen GetRadius() der Bot aktuell tatsaechlich
+    // steht (zwei getrennte Radien: Suchradius vs. tatsaechlicher Wirkradius des Effekts selbst) -
+    // sonst nullptr. Neu geschriebener Grid-Suchcode (kein bestehender Helfer dafuer im Core
+    // gefunden, siehe Rechercheergebnis) nach demselben Muster wie das bereits im Core vorhandene
+    // Unit::GetAreatriggerListInRange().
+    DynamicObject* FindHarmfulGroundEffectUnderBot(Player* bot, float searchRadius) const;
 
     // Absichtlich leer in dieser Runde - kein Bot kann derzeit angelegt werden.
     std::unordered_map<ObjectGuid, std::unique_ptr<IBotCharacter>> _bots;
@@ -780,8 +1196,32 @@ private:
         uint32 PatrolCyclesRemaining = 0;
         float PatrolAX = 0.0f, PatrolAY = 0.0f, PatrolAZ = 0.0f;
         float PatrolBX = 0.0f, PatrolBY = 0.0f, PatrolBZ = 0.0f;
+
+        // Kampf-KI: eigener Tick-Akkumulator fuer ProcessBotCombatAI() (alle ~400ms statt jeden
+        // Weltserver-Tick - Rotationsentscheidungen muessen nicht Millisekunden-praezise sein, und ein
+        // seltenerer Tick reduziert die Spell.db2/GetSpellHistory()-Pruefungen bei vielen Bots).
+        uint32 CombatAiTickAccumMs = 0;
+
+        // Autonomer Dungeon-Clear-Modus (siehe SetDungeonClearMode()) - eigener, groeberer Akkumulator
+        // (~1s statt ~400ms), da Routing-Entscheidungen weniger zeitkritisch sind als Rotationsschritte.
+        bool DungeonClearActive = false;
+        uint32 DungeonClearTickAccumMs = 0;
     };
     std::unordered_map<uint32, BotSessionEntry> _botSessions;
+
+    // Gruppe Stufe 2, Teil A: Bot-Accounts, die BotMgr aktuell als LFG-Fuell-Kandidat eingereiht hat
+    // (per JoinLfg(), siehe TriggerLfgPoolFillOnce()) - verhindert Doppel-Einreihung desselben Bots
+    // und markiert, fuer welche Bots AdvanceLfgFillerBots() pro Tick den Proposal-/Teleport-Fortschritt
+    // nachziehen muss. Ein Eintrag wird entfernt, sobald der Bot entweder erfolgreich in eine
+    // Dungeon-Gruppe uebernommen wurde (LFG_STATE_DUNGEON) oder die Queue ohne Match wieder verlassen
+    // hat (LFG_STATE_NONE, z.B. Proposal abgelehnt/Timeout) - siehe AdvanceLfgFillerBots().
+    std::unordered_set<uint32> _lfgFillerBotAccountIds;
+
+    // Akkumulator fuer den Lazy-Nachfuell-Timer (siehe ProcessLfgPoolFillTick()/
+    // LFG_POOL_FILL_INTERVAL_MS) - dieselbe Diff-Aufsummierungs-Konvention wie IdleTickAccumMs oben,
+    // aber EINMAL pro BotMgr statt pro Bot-Session (der Trigger prueft serverweit ueber alle Bots
+    // hinweg, nicht pro einzelner Session).
+    uint32 _lfgFillTickAccumMs = 0;
 };
 
 #define sBotMgr BotMgr::instance()

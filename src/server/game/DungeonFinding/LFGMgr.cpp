@@ -2153,6 +2153,16 @@ LFGDungeonsEntry const* LFGMgr::GetPlayerLFGDungeonEntry(ObjectGuid guid)
     return nullptr;
 }
 
+// Gruppe Stufe 2, Teil A: siehe Kopfkommentar in LFGMgr.h ("Bot-Matchmaking") fuer die Begruendung.
+uint32 LFGMgr::GetProposalId(ObjectGuid guid) const
+{
+    for (LfgProposalContainer::const_iterator it = ProposalsStore.begin(); it != ProposalsStore.end(); ++it)
+        if (it->second.players.find(guid) != it->second.players.end())
+            return it->first;
+
+    return 0;
+}
+
 bool LFGMgr::inLfgDungeonMap(ObjectGuid guid, uint32 map, Difficulty difficulty)
 {
     if (!guid.IsParty())

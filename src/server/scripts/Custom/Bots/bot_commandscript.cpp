@@ -35,6 +35,7 @@ EndScriptData */
 #include "RBAC.h"
 #include "ObjectAccessor.h"
 #include "WorldSession.h"
+#include "LFGMgr.h"
 #include <sstream>
 
 class bot_commandscript : public CommandScript
@@ -68,7 +69,14 @@ public:
             { "followstop",    rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestFollowStop,    "" },
             { "equipartifact", rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestEquipArtifact, "" },
             { "skillartifact", rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestSkillArtifact, "" },
+            { "lfgfill",       rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestLfgFill,       "" },
+            { "questaccept",   rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestQuestAccept,   "" },
+            { "questturnin",   rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestQuestTurnIn,   "" },
+            { "queststatus",   rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestQuestStatus,   "" },
+            { "dungeonclear",  rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestDungeonClear,  "" },
             { "status",        rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestStatus,        "" },
+            { "findnpc",       rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestFindNpc,       "" },
+            { "diagspells",    rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestDiagSpells,    "" },
         };
         static std::vector<ChatCommand> commandTable =
         {
@@ -832,6 +840,159 @@ public:
         return true;
     }
 
+    // .bottest lfgfill
+    // Gruppe Stufe 2, Teil A: manueller Einzelschritt-Test (unabhaengig vom automatischen ~10s-Timer
+    // in BotMgr::ProcessLfgPoolFillTick(), siehe BotMgr.h-Kopfkommentar) - stoesst GENAU EINEN
+    // Nachfuell-Versuch ueber alle aktiven LFG-Queues beider Fraktionen an. Nuetzlich, um ohne
+    // Wartezeit zu pruefen, ob ein wartender echter Spieler-Kandidat korrekt erkannt und ein
+    // passender Bot per LFGMgr::JoinLfg() eingereiht wird - siehe BotMgr::TriggerLfgPoolFillOnce()
+    // fuer den vollen Code-Review und Server.log (scripts.bots) fuer die Diagnose-Zeilen je Versuch.
+    static bool HandleBotTestLfgFill(ChatHandler* handler, char const* /*args*/)
+    {
+        bool filled = sBotMgr->TriggerLfgPoolFillOnce();
+        handler->PSendSysMessage("[bottest] lfgfill: %s - Server.log (scripts.bots) auf "
+            "'BotMgr::TriggerLfgPoolFillOnce' Diagnose-Zeilen pruefen (Kandidat/Rolle/Dungeon-Auswahl).",
+            filled ? "EIN Bot wurde eingereiht" : "kein Nachfuellbedarf erkannt ODER kein passender Bot verfuegbar");
+        return true;
+    }
+
+    // .bottest questaccept <accountId> <questGiverSpawnGuid> <questId>
+    // Quest-KI, Teil 1 (siehe BotMgr::BotAcceptQuest() fuer den vollen Code-Review): questGiverSpawnGuid
+    // ist die DB-Spawn-Id aus der `creature`-Tabelle (Spalte "guid"), dieselbe Konvention wie
+    // '.bottest attack'/'.bottest loot'. Der Bot muss dafuer bereits in Interaktionsreichweite des
+    // Questgebers stehen (z.B. per '.bottest teleport' dorthin gebracht).
+    static bool HandleBotTestQuestAccept(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest questaccept <accountId> <questGiverSpawnGuid> <questId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        uint32 accountId = 0, questId = 0;
+        uint64 questGiverSpawnGuid = 0;
+        iss >> accountId >> questGiverSpawnGuid >> questId;
+
+        if (accountId == 0 || questGiverSpawnGuid == 0 || questId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest questaccept <accountId> <questGiverSpawnGuid> <questId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->BotAcceptQuest(accountId, ObjectGuid::LowType(questGiverSpawnGuid), questId);
+        handler->PSendSysMessage("[bottest] questaccept(account %u, questGiverSpawnGuid %llu, quest %u): %s - "
+            "'.bottest queststatus %u %u' pruefen.", accountId, (unsigned long long)questGiverSpawnGuid, questId,
+            ok ? "OK (angenommen)" : "FEHLER (siehe Server.log)", accountId, questId);
+        return true;
+    }
+
+    // .bottest questturnin <accountId> <questGiverSpawnGuid> <questId> [rewardItemEntry]
+    // Gegenstueck zu '.bottest questaccept' - siehe BotMgr::BotTurnInQuest(). Quest muss vorher bereits
+    // QUEST_STATUS_COMPLETE sein (Zielfortschritt, z.B. Toetungs-Kill-Credit, laeuft automatisch ueber
+    // die normale Core-KillRewarder-Logik mit, sobald der Bot aktiv an einem Kill beteiligt war - siehe
+    // BotMgr.h-Kopfkommentar). WICHTIG (Praezisierung nach Code-Review, Runde 8): trotz des Parameter-
+    // Namens ist das der ECHTE Item-Entry (item_template.entry) der gewuenschten Auswahl-Belohnung,
+    // NICHT ein 0-basierter Auswahl-Index (siehe BotMgr.h-Kommentar bei BotTurnInQuest()) - z.B. bei
+    // einer Quest mit drei Waffen-Auswahlmoeglichkeiten den Item-Entry der GEWUENSCHTEN Waffe angeben,
+    // nicht 0/1/2. 0/leer ist nur fuer Quests OHNE Auswahl-Belohnung gueltig.
+    static bool HandleBotTestQuestTurnIn(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest questturnin <accountId> <questGiverSpawnGuid> <questId> "
+                "[rewardItemEntry] (echter Item-Entry der Auswahl-Belohnung, KEIN Index - 0/leer nur ohne "
+                "Auswahl-Belohnung)");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        uint32 accountId = 0, questId = 0, rewardItemEntry = 0;
+        uint64 questGiverSpawnGuid = 0;
+        iss >> accountId >> questGiverSpawnGuid >> questId;
+        if (iss >> rewardItemEntry) { }
+
+        if (accountId == 0 || questGiverSpawnGuid == 0 || questId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest questturnin <accountId> <questGiverSpawnGuid> <questId> "
+                "[rewardItemEntry] (echter Item-Entry der Auswahl-Belohnung, KEIN Index - 0/leer nur ohne "
+                "Auswahl-Belohnung)");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->BotTurnInQuest(accountId, ObjectGuid::LowType(questGiverSpawnGuid), questId, rewardItemEntry);
+        handler->PSendSysMessage("[bottest] questturnin(account %u, questGiverSpawnGuid %llu, quest %u, "
+            "rewardItemEntry %u): %s.", accountId, (unsigned long long)questGiverSpawnGuid, questId,
+            rewardItemEntry, ok ? "OK (abgegeben)" : "FEHLER (siehe Server.log)");
+        return true;
+    }
+
+    // .bottest queststatus <accountId> <questId>
+    static bool HandleBotTestQuestStatus(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest queststatus <accountId> <questId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        uint32 accountId = 0, questId = 0;
+        iss >> accountId >> questId;
+
+        if (accountId == 0 || questId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest queststatus <accountId> <questId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        int32 status = sBotMgr->GetBotQuestStatus(accountId, questId);
+        handler->PSendSysMessage("[bottest] queststatus(account %u, quest %u): roh=%d "
+            "(-1=kein Player, 0=NONE, 1=COMPLETE, 3=INCOMPLETE, 5=FAILED, 6=REWARDED - siehe QuestDef.h "
+            "enum QuestStatus fuer die vollstaendige, nicht durchgehende Nummerierung).",
+            accountId, questId, status);
+        return true;
+    }
+
+    // .bottest dungeonclear <accountId> <on|off>
+    // Autonomer Dungeon-Clear-Modus (siehe BotMgr::SetDungeonClearMode() fuer den vollen Code-Review,
+    // Ideenreferenz mod-dungeon-clear/README Abschnitt e)). Nur auf einer Dungeon-Karte aktivierbar - Bot
+    // vorher per '.bottest teleport' in eine Instanz bringen. Deaktiviert sich automatisch, sobald kein
+    // lebender Dungeon-Boss mehr auf der Karte gefunden wird.
+    static bool HandleBotTestDungeonClear(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest dungeonclear <accountId> <on|off>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        uint32 accountId = 0;
+        std::string onOff;
+        iss >> accountId >> onOff;
+
+        if (accountId == 0 || (onOff != "on" && onOff != "off"))
+        {
+            handler->SendSysMessage("Syntax: .bottest dungeonclear <accountId> <on|off>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        bool ok = sBotMgr->SetDungeonClearMode(accountId, onOff == "on");
+        handler->PSendSysMessage("[bottest] dungeonclear(account %u, %s): %s - Server.log (scripts.bots) auf "
+            "'BotMgr::ProcessDungeonClear'/'BotMgr::SetDungeonClearMode' Diagnose-Zeilen pruefen.",
+            accountId, onOff.c_str(), ok ? "OK" : "FEHLER (siehe Server.log)");
+        return true;
+    }
+
     // .bottest status <accountId>
     static bool HandleBotTestStatus(ChatHandler* handler, char const* args)
     {
@@ -873,9 +1034,114 @@ public:
             if (sBotMgr->IsBotPatrolActive(accountId))
                 handler->PSendSysMessage("[bottest] status(account %u): Patrol AKTIV - Zyklus %u/%u abgeschlossen.",
                     accountId, sBotMgr->GetBotPatrolCyclesCompleted(accountId), sBotMgr->GetBotPatrolCyclesTotal(accountId));
+
+            // Gruppe Stufe 2, Teil A: LFG-Zustand zusaetzlich sichtbar machen (dieselbe Begruendung wie
+            // beim Tod-Handling-Zusatz aus Runde 132 oben) - sLFGMgr->GetState()/GetSelectedDungeons()
+            // sind bereits oeffentliche, rein lesende LFGMgr-Methoden, kein neuer Core-Zugriff noetig.
+            lfg::LfgState lfgState = sLFGMgr->GetState(player->GetGUID());
+            handler->PSendSysMessage("[bottest] status(account %u): LFG-Zustand=%s (roh=%u).", accountId,
+                lfg::GetStateString(lfgState).c_str(), uint32(lfgState));
+
+            // Kampf-KI: erkannte Rolle anzeigen (Unknown = Skillung noch nicht in g_BotSpecRotations
+            // verdrahtet, siehe BotMgr.cpp-Kommentar) - hilft beim Live-Test ohne Server.log-Blick.
+            char const* roleStr = "Unknown (Skillung noch nicht verdrahtet)";
+            switch (sBotMgr->GetBotRole(accountId))
+            {
+                case BotRole::Tank:      roleStr = "Tank"; break;
+                case BotRole::Healer:    roleStr = "Healer"; break;
+                case BotRole::MeleeDps:  roleStr = "MeleeDps"; break;
+                case BotRole::RangedDps: roleStr = "RangedDps"; break;
+                default: break;
+            }
+            handler->PSendSysMessage("[bottest] status(account %u): Kampf-KI-Rolle=%s, "
+                "PrimarySpecialization=%u.", accountId, roleStr, player->GetPrimarySpecialization());
+
+            if (sBotMgr->IsDungeonClearModeActive(accountId))
+                handler->PSendSysMessage("[bottest] status(account %u): Dungeon-Clear-Modus AKTIV.", accountId);
         }
         else
             handler->PSendSysMessage("[bottest] status(account %u): %s - kein Player-Objekt vorhanden.", accountId, stateStr);
+        return true;
+    }
+
+    // .bottest findnpc <namePart> [radius=100] [accountId]
+    // Aktives Debug-Tool (Nutzer-Feedback "NPC-Positionen fehlen, baue ein Tool"): mehrere '.bottest'-
+    // Befehle (attack/loot/questaccept/questturnin) brauchen die DB-Spawn-Id (creature.guid) eines
+    // Ziel-NPCs, die man bisher nur per manueller SQL-Abfrage herausfinden konnte. Dieser Befehl
+    // durchsucht stattdessen die BEREITS GELADENEN Kreaturen um eine Position herum nach einem
+    // Namens-Teilstring (case-insensitiv) und listet Spawn-Id+Position+Distanz je Treffer auf - siehe
+    // BotMgr::FindNpcSpawnsByName() fuer den vollen Code-Review. Zentrum ist standardmaessig der
+    // ausfuehrende GM-Charakter selbst; ohne echten GM-Client (Konsole/RA) stattdessen [accountId]
+    // eines bereits eingeloggten (Bot-)Accounts angeben, dessen Position als Zentrum dient.
+    static bool HandleBotTestFindNpc(ChatHandler* handler, char const* args)
+    {
+        if (!*args)
+        {
+            handler->SendSysMessage("Syntax: .bottest findnpc <namePart> [radius=100] [accountId] "
+                "(ohne accountId: Position des ausfuehrenden GM-Charakters)");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::istringstream iss(args);
+        std::string namePart;
+        float radius = 100.0f;
+        uint32 accountId = 0;
+        iss >> namePart;
+        if (iss >> radius) { }
+        if (iss >> accountId) { }
+
+        if (namePart.empty())
+        {
+            handler->SendSysMessage("Syntax: .bottest findnpc <namePart> [radius=100] [accountId]");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        WorldObject* center = nullptr;
+        if (accountId != 0)
+            center = sBotMgr->GetBotPlayer(accountId);
+        else if (handler->GetSession() && handler->GetSession()->GetPlayer())
+            center = handler->GetSession()->GetPlayer();
+
+        if (!center)
+        {
+            handler->SendSysMessage("[bottest] findnpc: kein Zentrum gefunden - entweder als echter "
+                "GM-Client aufrufen (kein Konsolen-/RA-Aufruf moeglich) oder [accountId] eines bereits "
+                "eingeloggten (Bot-)Accounts angeben.");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::vector<std::string> results = sBotMgr->FindNpcSpawnsByName(center, namePart, radius);
+        if (results.empty())
+        {
+            handler->PSendSysMessage("[bottest] findnpc('%s', radius %.0f): keine Treffer im aktuell "
+                "geladenen Grid um %s.", namePart.c_str(), radius, center->GetName().c_str());
+            return true;
+        }
+
+        handler->PSendSysMessage("[bottest] findnpc('%s', radius %.0f): %u Treffer um %s -",
+            namePart.c_str(), radius, uint32(results.size()), center->GetName().c_str());
+        for (std::string const& line : results)
+            handler->PSendSysMessage("  %s", line.c_str());
+        return true;
+    }
+
+    // .bottest diagspells
+    // Aktives Debug-Tool (Nutzer-Feedback "suche aktiv nach Fehlern und fehlenden Werten"): erzwingt
+    // die Aufloesung ALLER 36 g_BotSpecRotations-Eintraege auf einen Schlag (siehe
+    // BotMgr::DiagnoseSpecRotations() fuer den vollen Code-Review) und meldet jeden Faehigkeits-/Aura-/
+    // Interrupt-/Dispel-Namen, der gegen das aktuell geladene Spell.db2 (Build 26972) NICHT aufgeloest
+    // werden konnte - ohne dafuer 36 verschieden geskillte Bots anlegen/ausruesten zu muessen.
+    static bool HandleBotTestDiagSpells(ChatHandler* handler, char const* /*args*/)
+    {
+        std::string report = sBotMgr->DiagnoseSpecRotations();
+        std::istringstream lines(report);
+        std::string line;
+        while (std::getline(lines, line))
+            if (!line.empty())
+                handler->PSendSysMessage("[bottest] diagspells: %s", line.c_str());
         return true;
     }
 };

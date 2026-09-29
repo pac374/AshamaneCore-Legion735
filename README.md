@@ -17,7 +17,9 @@ Dieses Repository enthaelt den **C++-Quellcode**: eigene GM-Commands, SmartAI-Er
   * [b) Funktioniert, aber eigene Interpretation](#b-funktioniert-aber-eigene-interpretation--nicht-100--blizzlike)
   * [c) Bewusst offen / ungeloest](#c-bewusst-offen--ungeloest-mit-grund)
   * [d) In aktiver Entwicklung](#d-in-aktiver-entwicklung)
+  * [e) Roadmap](#e-roadmap---naechste-bausteine-inspiriert-von-aber-neu-gebaut-gegenueber-3.3.5-community-modulen)
 * [Setup / Build](#setup--build)
+* [Befehlsuebersicht](README-Commands.md) - alle "."-Befehle der Custom-Module (Playerbots, Dungeon-Clear, AhBot, OllamaChat)
 * [Mitarbeit](#mitarbeit)
 
 ## Ausgangsbasis & Lizenz
@@ -185,17 +187,40 @@ Zwischenstand - deshalb ein eigener Abschnitt statt (b) oder (c).
   `MotionMaster::MoveFollow()` folgen (`.bottest follow|followstop`), mehrfach ueber laengere Zeitraeume
   verifiziert.
 
+**Zwischenzeitlich ergaenzt (seit dem letzten Stand dieses Abschnitts):**
+
+- **LFG-Pool-Matchmaking**: Bots stehen jetzt solo im regulaeren `LFGMgr`-Warteschlangensystem und werden per
+  Lazy-Nachfuell-Trigger passend zu wartenden echten Spielern eingereiht (`BotMgr::TriggerLfgPoolFillOnce()`),
+  kein separater Bot-Direktpfad.
+- **Kampf-KI**: alle 36 Legion-Spezialisierungen haben eine datengetriebene Rotationstabelle
+  (`g_BotSpecRotations`, `BotMgr::ProcessBotCombatAI()`) - Faehigkeiten-Namen/-Reihenfolgen sind Patch-7.3.5-
+  recherchiert, numerische Spell-IDs werden NIE hartkodiert, sondern zur Laufzeit gegen das auf diesem Server
+  geladene `Spell.db2` aufgeloest (siehe Kommentar bei `BotMgr::ResolveSpellIdByName()`).
+- **Quest-KI, Teil 1**: Annahme/Abgabe ueber direkte `Player`-Methodenaufrufe (`BotAcceptQuest()`/
+  `BotTurnInQuest()`), Toetungs-Kill-Credit laeuft automatisch ueber die normale Core-Logik mit.
+- **Teil-Loesung fuer "kein autonomer Zustandsautomat"**: ein Bot in einer Gruppe engagiert jetzt automatisch
+  dasselbe Kampfziel wie ein bereits kaempfendes Gruppenmitglied (`SelectBotCombatTarget()`).
+- **Aktive Debug-Werkzeuge** (Runde 6, Antwort auf "suche aktiv nach Fehlern/fehlenden Werten"):
+  `.bottest findnpc <namePart>` findet die DB-Spawn-Id/Position eines NPCs anhand seines Namens (loest das
+  wiederkehrende "ich kenne die Spawn-Id nicht"-Problem bei `attack`/`loot`/`questaccept`/`questturnin` ohne
+  manuelle SQL-Abfrage); `.bottest diagspells` erzwingt die Aufloesung ALLER 36 Kampf-KI-Rotationen auf
+  einen Schlag und meldet jeden gegen das aktuelle `Spell.db2` nicht aufloesbaren Faehigkeits-/Aura-/
+  Interrupt-/Dispel-Namen. Siehe [README-Commands.md](README-Commands.md) fuer die vollstaendige
+  Befehlsuebersicht aller Custom-Module.
+
 **Was (noch) nicht existiert:**
 
-- **Kein autonomer Zustandsautomat**: jede Aktion wird einzeln per GM-Befehl ausgeloest, kein selbststaendiger
-  Lebenszyklus.
-- **LFG-Pool-Matchmaking** (Bots stehen aktiv im Dungeon-Finder-Pool zur Verfuegung, Gruppe wird automatisch
-  passend zu Spieler-Level/Ilvl zusammengestellt) ist entworfen, aber noch nicht implementiert.
+- **Voll autonomer Zustandsautomat**: die obige Mit-Kampf-Automatik deckt nur das Ziel-Engagement ab - eigene
+  Entscheidungsfindung ("was tue ich als naechstes ohne GM-Befehl") fehlt noch weitgehend ausserhalb von Kampf
+  und LFG. Siehe Abschnitt e) fuer den geplanten naechsten Schritt (autonomer Dungeon-Clear-Modus).
 - **Artefaktwaffen fuer Bots** (Zuweisung + levelgerechtes Skillen) ist in Arbeit.
-- **Quest-KI** ist noch nicht begonnen (bewusst hinter Gruppe/LFR eingeordnet).
+- **Quest-KI, Teil 2** (autonome Quest-Auswahl + Mehr-Zonen-Navigation zum Questgeber/-ziel) ist noch nicht
+  begonnen.
 - Das Loot-System fuer Bots wurde **bewusst nicht gebaut** (Entscheidung): Bots erhalten ihre Ausruestung
   ausschliesslich ueber den Equipment-Pool, aktives Looten waere fuer reine Gruppen-/LFR-Fuellbots unnoetiger
-  Aufwand ohne Nutzen.
+  Aufwand ohne Nutzen. (Ausnahme: der neue Dungeon-Clear-Modus in Abschnitt e) loest nach jedem Kill automatisch
+  `BotLootTarget()` aus - das ist weiterhin kein "Spieler entscheidet, was er behaelt"-Loot-System, sondern reine
+  Bewegungsfreigabe fuer den naechsten Kampf.)
 
 **Vier unabhaengige, strukturelle Fehlerursachen gefunden und behoben** (nicht nur symptomatisch umschifft -
 interessant fuer andere TrinityCore-Entwickler, die Aehnliches versuchen):
@@ -227,6 +252,129 @@ interessant fuer andere TrinityCore-Entwickler, die Aehnliches versuchen):
    Spielerzustand - im selben spaeten Zeitfenster ebenfalls ein Zugriff auf einen bereits geschlossenen
    DB-Pool. Fix nach demselben Muster: dieser Online-Flag-Reset erfolgt jetzt ebenfalls vorher, waehrend der
    `LoginDatabase`-Pool noch garantiert lebt; der Destruktor bleibt fuer Bot-Sessions vollstaendig DB-frei.
+
+**Runde 6: ein Modul-Kollisions-Fund bei der modulweiten Durchsicht** (kein Core-Fund wie oben, sondern
+zwei eigene Custom-Module, die sich gegenseitig ins Gehege kamen): `PlayerScript::OnChat()` (Whisper-
+Ueberladung) wird fuer JEDE Whisper aufgerufen, ungeachtet ihrer `lang` - sowohl fuer normale sichtbare
+Spieler-Whispers ALS AUCH fuer die neue Addon-Steuernachricht des Dungeon-Clear-Moduls
+(`lang==LANG_ADDON`, siehe Abschnitt e)). Der Ollama-Chat-Hook (`ollamachat_scriptloader.cpp`) filterte
+urspruenglich nicht nach `lang` - eine an einen Bot gerichtete Addon-Nachricht wie `"ASHDC:CMD:ON"` haette
+dadurch versehentlich AUCH die Ollama-LLM ausgeloest und eine sinnlose In-Charakter-Antwort auf den
+Steuertext erzeugt. Fix: der Ollama-Hook ignoriert jetzt explizit `lang==LANG_ADDON` (siehe README-
+Commands.md, Abschnitt "Modul OllamaChat", fuer die dokumentierte Abgrenzung). Gefunden durch eine
+systematische Durchsicht aller `PlayerScript`-Hook-Ueberladungen ueber alle Custom-Module hinweg, nicht
+durch einen Livetest - noch nicht gegen einen laufenden Server verifiziert (siehe Test-Checkliste im PR).
+
+**Runde 7: erster echter Build + Livetest (MSVC, fremde Session) - zwei Compile-Fehler und ein
+Korrektheits-Fund in der Kampf-KI.** Zum ersten Mal seit Beginn dieses Playerbots-Moduls wurde der Code
+tatsaechlich kompiliert (in dieser Entwicklungsumgebung ist dafuer kein Toolchain vorhanden) und live
+gegen einen laufenden Server getestet:
+- Zwei MSVC-Compile-Fehler (Include-Pfad `BotMgr.h` aus `Custom/OllamaChat/` heraus, mehrdeutiger Name
+  `LfgQueueRoleCount` durch eine widerspruechliche globale Vorwaertsdeklaration in `LFGMgr.h` kombiniert
+  mit `using namespace lfg;`) - beide gefixt, Build lief danach durch (Exit 0).
+- **Wichtigster Fund**: `.bottest diagspells` (siehe Abschnitt d)) deckte auf, dass `ResolveSpellIdByName()`
+  bei mehreren exakten Namenstreffern (Spell.db2 enthaelt fuer die meisten Grundfaehigkeiten weiterhin die
+  alten Rang-Duplikate aus Classic bis Cata, z.B. Frostbolt/Judgment/Healing Wave/Execute/Shield Slam) den
+  ERSTEN Treffer nach aufsteigender Id waehlte - das ist bei praktisch allen betroffenen Faehigkeiten die
+  NIEDRIGSTE/AELTESTE Version, nicht die aktuelle Legion-Fassung. Betraf ~135 von ~250 eindeutigen
+  Faehigkeitsnamen ueber alle 36 Rotationen. Fix: bei mehreren Treffern wird jetzt die HOECHSTE Spell-Id
+  verwendet (Blizzard fuegt bei einer Faehigkeits-Ueberarbeitung neue DB2-Eintraege hinzu, alte Rang-
+  Eintraege behalten ihre urspruengliche niedrige Id dauerhaft). Zusaetzlich loesten 6 tatsaechlich
+  existierende 7.3.5-Namen (`Disrupt`, `Clearcasting`, `Heating Up`, `Barbed Shot`, `Wildfire Bomb`,
+  `Demonic Core`) trotzdem NICHT auf: `ResolveSpellIdByName()` hat jetzt einen klassenuebergreifenden
+  Fallback (nur bei GENAU EINEM Treffer uebernommen, sonst weiterhin "nicht gefunden"), der die meisten
+  davon abdeckt; `Barbed Shot` (Hunter Beast Mastery) war dagegen schlicht eine BfA-Faehigkeit, die es in
+  Legion 7.3.5 noch nicht gab - ersatzlos aus der Rotation entfernt statt geraten. `Wildfire Bomb` (Hunter
+  Survival) bleibt ein offener, dokumentierter Pruefpunkt (siehe Kommentar bei specId 255 in `BotMgr.cpp`).
+- Zusaetzlich (Verdachtsmoment, nicht abschliessend zugeordnet): ein anhaltender Paket-Strom
+  (`SMSG_ATTACKER_STATE_UPDATE`/`SMSG_THREAT_UPDATE`) bei einem frisch erstellten, alleinstehenden Bot am
+  Standard-Spawnpunkt. Per Code-Review AUSGESCHLOSSEN als Ursache: `ProcessBotMechanicReactions()` (das
+  neue Boss-Mechanik-System aus Runde 6) wird in `ProcessBotCombatAI()` erst NACH einem fruehen
+  "kein Kampf-/Heilziel vorhanden"-Abbruch aufgerufen - fuer einen gruppenlosen, vollstaendig gesunden Bot
+  ohne Ziel wird die Funktion nachweislich nie erreicht. Wahrscheinlicher: normale Sichtbarkeits-Pakete
+  eines echten, unabhaengigen Kampfgeschehens am selben Spawnpunkt (ein zweiter, aelterer Testaccount stand
+  laut Bericht zufaellig an derselben Stelle). Trotzdem zusaetzlich gehaertet: das Ausweichen vor
+  Bodeneffekten in `ProcessBotMechanicReactions()` gibt jetzt keinen neuen `MovePoint()`-Befehl mehr an
+  den MotionMaster, solange eine vorherige Ausweichbewegung noch laeuft (`POINT_MOTION_TYPE`-Check) - vermeidet
+  unnoetig wiederholte Bewegungspakete bei vielen gleichzeitig betroffenen Bots, unabhaengig davon, ob das
+  hier tatsaechlich die Ursache war.
+
+### e) Roadmap - naechste Bausteine (inspiriert von, aber NEU gebaut gegenueber 3.3.5-Community-Modulen)
+
+Drei Community-Module aus dem WotLK-3.3.5-Oekosystem (AzerothCore) dienen als **Ideen-/Zielreferenz** fuer die
+naechsten Playerbots-Ausbaustufen - **nicht** als Code-Quelle: alle drei stehen unter AGPL-3.0 (netzwerk-
+copyleft, staerker als unser GPL-2.0), ausserdem ist die AzerothCore-3.3.5-API (andere Core-Version, andere
+Klassen-/Spell-/Instanz-Datenlage) technisch inkompatibel mit diesem TrinityCore-Legion-7.3.5-Fork. Uebernommen
+wird ausschliesslich das **Feature-Konzept** (was soll das Modul koennen), die Implementierung ist in jedem Fall
+eine eigenstaendige Neuentwicklung gegen unsere eigenen Core-APIs:
+
+- **[mod-dungeon-clear](https://github.com/jrad7/mod-dungeon-clear)** (Referenz fuer: autonomer Dungeon-Clear-
+  Modus) - **umgesetzt** (`BotMgr::SetDungeonClearMode()`/`ProcessDungeonClear()`). Kernidee, die
+  uebernommen wird: Routen werden **live aus dem Navmesh generiert, keine
+  handgepflegten Wegpunkte pro Dungeon** - das passt direkt zu unserer bereits bestaetigten
+  `MotionMaster::MovePoint(generatePath=true)`-Navmesh-Bewegung (Runde U/`MoveBotTestStepPath()`). Unsere
+  Variante navigiert autonom zum naechsten lebenden Dungeon-Boss auf der aktuellen Karte (ueber
+  `Creature::IsDungeonBoss()` - dynamisch aus der `instance_encounters`-Tabelle gesetztes `flags_extra`-Bit,
+  zuverlaessiger als `CreatureTemplate::rank`, keine Dungeon-spezifischen Daten unsererseits noetig), engagiert
+  Trash automatisch ueber die
+  bereits bestehende `SelectBotCombatTarget()`-Mit-Kampf-Logik und loest nach jedem Kill automatisch
+  `BotLootTarget()` aus. **Zusaetzlich umgesetzt** (Runde 6, `BotMgr::ProcessBotMechanicReactions()`): eine
+  GENERISCHE (nicht Boss-spezifische) Mechanik-Reaktionsebene, die JEDEM Encounter gemeinsam ist - gefaehrliche
+  Bodeneffekte werden verlassen (`DynamicObject::GetSpellInfo()->IsPositive()==false` + Bot steht innerhalb
+  `GetRadius()`), Skillungen mit Interrupt (siehe `g_BotSpecRotations`) unterbrechen automatisch castende
+  Gegner, Skillungen mit Dispel entfernen automatisch entfernbare Debuffs (beides preemptiert die normale
+  Rotation fuer den aktuellen Tick). Weiterhin bewusst NICHT uebernommen (braucht eine Boss-genaue
+  Wissensbasis pro Encounter, die fuer Legion-Dungeons nicht recherchiert wurde): Boss-spezifisches
+  Ausweich-Positionswissen, Soak-Mechaniken, Pull-Stile (Leeroy/Advanced/Dynamic), Encounter-Skripte (Hebel/
+  Altare/Eskorten), Heiler-Positionierung, Tod-Wiederbelebungs-Choreographie.
+- **[mod-ah-bot-plus](https://github.com/NathanHandley/mod-ah-bot-plus)** (Referenz fuer: Auktionshaus-Bot) -
+  **Recherche-Ergebnis: braucht keine Neuentwicklung.** Dieser TrinityCore-Fork bringt unter
+  `src/server/game/AuctionHouseBot/` (`AuctionHouseBot.*`, `AuctionHouseBotSeller.*`,
+  `AuctionHouseBotBuyer.*`, GM-Befehle in `src/server/scripts/Commands/cs_ahbot.cpp`) bereits ein
+  vollstaendiges, natives Seller-/Buyer-Auktionshaus-Bot-System mit - GPL-2.0 (TrinityCore-eigener Code,
+  nicht das AGPL-Referenzmodul), funktional gleichwertig zum Kernkonzept von mod-ah-bot-plus (config-
+  getriebene Preisbildung nach Kategorie/Qualitaet/Itemlevel, periodisches Listen/Kaufen ueber
+  echte-aber-nie-eingeloggte Bot-Account-Charaktere, GM-Befehle `.ahbot reload/empty/update`). Aktuell
+  **deaktiviert** (`AuctionHouseBot.Seller.Enabled = 0` in `worldserver.conf.dist`, Zeile ~3304) - der
+  naechste Schritt ist reine Konfiguration/Inbetriebnahme (Bot-Account mit ein paar nie einzuloggenden
+  Charakteren anlegen, `AuctionHouseBot.Account`/`.Seller.Enabled`/`.Buyer.*.Enabled` setzen), kein
+  C++-Code noetig. Die "Plus"-Verbesserungen der Referenz (non-SQL-Kategorie-Konfiguration, erweiterte
+  Preisformel-Tabelle, Mehrfach-Bot-Namen) waeren ein separates, kleineres Ausbauprojekt AUF dem bereits
+  vorhandenen nativen System, keine Neuentwicklung von Grund auf.
+- **[mod-ollama-chat](https://github.com/DustinHendrickson/mod-ollama-chat)** (Referenz fuer: LLM-gestuetzter
+  Bot-Chat) - **umgesetzt** unter `src/server/scripts/Custom/OllamaChat/`. Kernidee: whispert ein echter
+  Spieler einen Bot an, generiert der Bot seine Antwort ueber eine lokale Ollama-HTTP-API statt gar nicht/
+  zufaellig zu antworten. Bewusst KEINE Drittbibliothek vendored (das Referenzmodul nutzt cpp-httplib +
+  nlohmann/json, beide MIT-lizenziert und fuer sich unproblematisch mit GPL-2.0 kombinierbar - das war
+  nicht der Hinderungsgrund): stattdessen ein minimaler, selbst geschriebener HTTP/1.1-Client auf
+  `boost::asio`-Basis (bereits eine verlinkte Core-Abhaengigkeit, siehe `OllamaHttpClient.h/.cpp`) plus
+  handgeschriebene String-basierte JSON-Konstruktion/-Extraktion (`OllamaChatMgr.cpp`) - fuer den engen
+  Anwendungsfall (ein JSON-POST, ein JSON-Feld auslesen) angemessen und ohne ~56.000 Zeilen ungetesteten
+  Fremdcode. Der eigentliche HTTP-Request laeuft auf einem dedizierten Hintergrund-Thread pro Anfrage
+  (siehe `OllamaChatMgr.h`-Kopfkommentar fuer das volle Thread-Sicherheits-Modell) - blockiert also NICHT
+  den World-Update-Thread. Dokumentierte Einschraenkungen: kein TLS, kein Chunked-Transfer-Encoding, kein
+  explizites Timeout, keine Konversations-Historie/Persoenlichkeits-Profile wie im Referenzmodul.
+- **[mod-dungeon-clear-addon](https://github.com/jrad7/mod-dungeon-clear-addon)** (Referenz fuer: Client-Addon
+  zur Steuerung des Dungeon-Clear-Modus) - **umgesetzt** unter `tools/addons/AshDC_DungeonClear/` (Runde 6).
+  Referenzmodul ist ein WotLK-3.3.5-Lua-Addon (`## Interface: 30300`, AGPL-3.0) - Struktur/Funktionsweise von
+  WoW-Addons hat sich seit WotLK nicht grundlegend geaendert (Slash-Befehle, `CHAT_MSG_*`-Events, Addon-
+  Nachrichtenkanal), trotzdem komplett neu fuer Client-Build 26972 (Legion 7.3.5, `## Interface: 70300`)
+  geschrieben und strikt auf das beschraenkt, was `bot_dungeonclear_control.cpp` (neu, Runde 6) serverseitig
+  tatsaechlich anbietet: zwei gleichwertige Steuerwege - ein Party-/Raid-Chat-Schluesselwort (`!dc on/off/
+  status`, `PlayerScript::OnChat()`-Group-Ueberladung, braucht KEINEN Addon-Kanal) und eine an einen
+  bestimmten Bot gerichtete Addon-Whisper-Nachricht (`SendAddonMessage(prefix, "ASHDC:CMD:...", "WHISPER",
+  <BotName>)`). Wichtige, per Recherche bestaetigte Einschraenkung: `PlayerScript::OnChat()` bekommt bei einer
+  Addon-Nachricht nur Text + `lang==LANG_ADDON`, NICHT den eigentlichen Addon-Prefix (`Player::WhisperAddon()`
+  reicht ihn nicht an `sScriptMgr->OnPlayerChat()` durch) - geloest, indem die Server-Antwort als normale
+  sichtbare System-/Whisper-Nachricht mit festem Text-Praefix `"[AshDC]"` zurueckkommt, die das Addon per
+  eigenem `CHAT_MSG_SYSTEM`/`CHAT_MSG_WHISPER`-Hook erkennt und in einem kleinen Status-Fenster anzeigt -
+  kein echtes `CHAT_MSG_ADDON`-Client-Event noetig. Bewusst NICHT uebernommen: Boss-Mechanik-Datenbank/
+  Ausweich-UI, Pull-Stil-Auswahl, Konfigurations-Fenster/SavedVariables (passend zum aktuellen Server-
+  Funktionsumfang, siehe oben).
+
+Umsetzungsstand dieser Punkte: siehe Commit-Historie/PRs nach diesem README-Stand - wird hier bewusst nicht
+laufend nachgepflegt, um Drift zwischen Code und Dokumentation zu vermeiden; der PR-Text der jeweiligen
+Implementierungsrunde ist die verbindliche Quelle fuer den genauen Umfang/die Annahmen.
 
 ## Setup / Build
 
