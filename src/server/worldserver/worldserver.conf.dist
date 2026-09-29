@@ -4185,6 +4185,28 @@ NetherlightCrucible.ClientUI = 0
 ###################################################################################################
 
 ###################################################################################################
+# PLAYERBOTS - Master-Schalter (Runde 8, Kontrollzentrum-Anforderung: "alle Komponenten an/aus
+# schalten und sehen ob sie an oder aus sind" - siehe src/server/scripts/Custom/Bots/BotMgr.h/.cpp)
+#
+#    Playerbots.Enable
+#       Description: Globaler Schalter fuer den BotMgr-Tick-Heartbeat (Login/Bewegung/Kampf-KI/LFG-
+#                    Nachfuellen/Dungeon-Clear aller Bot-Sessions). Bei 0 wird BotMgr::Tick() aus
+#                    WorldScript::OnUpdate() uebersprungen - bereits eingeloggte Bots frieren an Ort
+#                    und Stelle ein (kein automatischer Logout, kein Datenverlust), neue Bot-Aktionen
+#                    (Login/Bewegung/Kampf) finden nicht mehr statt, bis wieder auf 1 gesetzt wird. Per
+#                    '.reload config' zur Laufzeit aenderbar (kein Serverneustart noetig, siehe
+#                    OnConfigLoad() in bot_scriptloader.cpp) - GM-Befehle unter '.bottest ...' bleiben
+#                    davon unberuehrt nutzbar (z.B. um trotz Enable=0 gezielt einen einzelnen Bot per
+#                    Hand zu testen).
+#       Default:     1
+#
+
+Playerbots.Enable = 1
+
+#
+###################################################################################################
+
+###################################################################################################
 # OLLAMA CHAT (Playerbots-Modul, Ideenreferenz mod-ollama-chat - siehe README Abschnitt e) fuer die
 # Lizenz-/Kompatibilitaets-Begruendung: komplett neu gegen diesen Core geschrieben, keine Codezeile aus
 # dem AGPL-3.0-Referenzmodul uebernommen, nur das Feature-Konzept. Voller Design-Kommentar in

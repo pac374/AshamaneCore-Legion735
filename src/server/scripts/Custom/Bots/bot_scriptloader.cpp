@@ -71,8 +71,17 @@ class bot_worldscript_tick : public WorldScript
     public:
         bot_worldscript_tick() : WorldScript("bot_worldscript_tick") { }
 
+        // Runde 8 (Kontrollzentrum-Anforderung "Playerbots an/aus schalten"): laedt/aktualisiert
+        // Playerbots.Enable bei Start UND bei jedem '.reload config' - siehe BotMgr::LoadConfig().
+        void OnConfigLoad(bool /*reload*/) override
+        {
+            sBotMgr->LoadConfig();
+        }
+
         void OnUpdate(uint32 diff) override
         {
+            if (!sBotMgr->IsModuleEnabled())
+                return; // Playerbots.Enable=0 - Heartbeat komplett pausiert, siehe BotMgr.h-Kommentar
             sBotMgr->Tick(diff);
         }
 
