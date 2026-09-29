@@ -955,11 +955,11 @@ public:
     // Map::GetCreatureBySpawnIdStore()-Aufloesung wird wiederverwendet.
     bool BotAcceptQuest(uint32 accountId, ObjectGuid::LowType questGiverSpawnGuid, uint32 questId);
 
-    // Gegenstueck: Abgabe/Belohnung. rewardItemChoiceId ist der ECHTE Item-Entry der gewaehlten
+    // Gegenstueck: Abgabe/Belohnung. rewardItemEntry ist der ECHTE Item-Entry der gewaehlten
     // Belohnung (nicht ein Belohnungs-Slot-Index) - siehe WorldPackets::Quest::QuestGiverChooseReward.
     // 0 ist gueltig fuer Quests ohne Auswahl-Belohnung.
     bool BotTurnInQuest(uint32 accountId, ObjectGuid::LowType questGiverSpawnGuid, uint32 questId,
-        uint32 rewardItemChoiceId);
+        uint32 rewardItemEntry);
 
     // Fuer '.bottest queststatus'/Diagnose und fuer eine spaetere autonome Schleife ("ist dieses
     // Questziel schon fertig?"): liefert den rohen QuestStatus-Enum-Wert als int32 (QUEST_STATUS_NONE/

@@ -3723,7 +3723,7 @@ bool BotMgr::BotAcceptQuest(uint32 accountId, ObjectGuid::LowType questGiverSpaw
 }
 
 bool BotMgr::BotTurnInQuest(uint32 accountId, ObjectGuid::LowType questGiverSpawnGuid, uint32 questId,
-    uint32 rewardItemChoiceId)
+    uint32 rewardItemEntry)
 {
     auto itr = _botSessions.find(accountId);
     if (itr == _botSessions.end() || !itr->second.Session)
@@ -3767,20 +3767,20 @@ bool BotMgr::BotTurnInQuest(uint32 accountId, ObjectGuid::LowType questGiverSpaw
         return false;
     }
 
-    if (!player->CanRewardQuest(quest, rewardItemChoiceId, true))
+    if (!player->CanRewardQuest(quest, rewardItemEntry, true))
     {
         TC_LOG_ERROR("scripts.bots", "BotMgr::BotTurnInQuest: Account %u - CanRewardQuest() fuer Quest %u ('%s') "
-            "mit rewardItemChoiceId %u lieferte false (ungueltige Belohnungswahl?).", accountId, questId,
-            quest->GetLogTitle().c_str(), rewardItemChoiceId);
+            "mit rewardItemEntry %u lieferte false (ungueltige Belohnungswahl?).", accountId, questId,
+            quest->GetLogTitle().c_str(), rewardItemEntry);
         return false;
     }
 
     // Derselbe Aufruf, den HandleQuestgiverChooseRewardOpcode() selbst nach den obigen Checks macht.
-    player->RewardQuest(quest, rewardItemChoiceId, questGiver);
+    player->RewardQuest(quest, rewardItemEntry, questGiver);
 
     TC_LOG_INFO("scripts.bots", "BotMgr::BotTurnInQuest: Account %u - Quest %u ('%s') bei Questgeber '%s' "
-        "(Spawn " UI64FMTD ") abgegeben, rewardItemChoiceId %u.", accountId, questId, quest->GetLogTitle().c_str(),
-        questGiver->GetName().c_str(), questGiverSpawnGuid, rewardItemChoiceId);
+        "(Spawn " UI64FMTD ") abgegeben, rewardItemEntry %u.", accountId, questId, quest->GetLogTitle().c_str(),
+        questGiver->GetName().c_str(), questGiverSpawnGuid, rewardItemEntry);
     return true;
 }
 

@@ -889,37 +889,45 @@ public:
         return true;
     }
 
-    // .bottest questturnin <accountId> <questGiverSpawnGuid> <questId> [rewardItemChoiceId]
+    // .bottest questturnin <accountId> <questGiverSpawnGuid> <questId> [rewardItemEntry]
     // Gegenstueck zu '.bottest questaccept' - siehe BotMgr::BotTurnInQuest(). Quest muss vorher bereits
     // QUEST_STATUS_COMPLETE sein (Zielfortschritt, z.B. Toetungs-Kill-Credit, laeuft automatisch ueber
     // die normale Core-KillRewarder-Logik mit, sobald der Bot aktiv an einem Kill beteiligt war - siehe
-    // BotMgr.h-Kopfkommentar). rewardItemChoiceId optional/0 fuer Quests ohne Auswahl-Belohnung.
+    // BotMgr.h-Kopfkommentar). WICHTIG (Praezisierung nach Code-Review, Runde 8): trotz des Parameter-
+    // Namens ist das der ECHTE Item-Entry (item_template.entry) der gewuenschten Auswahl-Belohnung,
+    // NICHT ein 0-basierter Auswahl-Index (siehe BotMgr.h-Kommentar bei BotTurnInQuest()) - z.B. bei
+    // einer Quest mit drei Waffen-Auswahlmoeglichkeiten den Item-Entry der GEWUENSCHTEN Waffe angeben,
+    // nicht 0/1/2. 0/leer ist nur fuer Quests OHNE Auswahl-Belohnung gueltig.
     static bool HandleBotTestQuestTurnIn(ChatHandler* handler, char const* args)
     {
         if (!*args)
         {
-            handler->SendSysMessage("Syntax: .bottest questturnin <accountId> <questGiverSpawnGuid> <questId> [rewardItemChoiceId]");
+            handler->SendSysMessage("Syntax: .bottest questturnin <accountId> <questGiverSpawnGuid> <questId> "
+                "[rewardItemEntry] (echter Item-Entry der Auswahl-Belohnung, KEIN Index - 0/leer nur ohne "
+                "Auswahl-Belohnung)");
             handler->SetSentErrorMessage(true);
             return false;
         }
 
         std::istringstream iss(args);
-        uint32 accountId = 0, questId = 0, rewardItemChoiceId = 0;
+        uint32 accountId = 0, questId = 0, rewardItemEntry = 0;
         uint64 questGiverSpawnGuid = 0;
         iss >> accountId >> questGiverSpawnGuid >> questId;
-        if (iss >> rewardItemChoiceId) { }
+        if (iss >> rewardItemEntry) { }
 
         if (accountId == 0 || questGiverSpawnGuid == 0 || questId == 0)
         {
-            handler->SendSysMessage("Syntax: .bottest questturnin <accountId> <questGiverSpawnGuid> <questId> [rewardItemChoiceId]");
+            handler->SendSysMessage("Syntax: .bottest questturnin <accountId> <questGiverSpawnGuid> <questId> "
+                "[rewardItemEntry] (echter Item-Entry der Auswahl-Belohnung, KEIN Index - 0/leer nur ohne "
+                "Auswahl-Belohnung)");
             handler->SetSentErrorMessage(true);
             return false;
         }
 
-        bool ok = sBotMgr->BotTurnInQuest(accountId, ObjectGuid::LowType(questGiverSpawnGuid), questId, rewardItemChoiceId);
+        bool ok = sBotMgr->BotTurnInQuest(accountId, ObjectGuid::LowType(questGiverSpawnGuid), questId, rewardItemEntry);
         handler->PSendSysMessage("[bottest] questturnin(account %u, questGiverSpawnGuid %llu, quest %u, "
-            "rewardItemChoiceId %u): %s.", accountId, (unsigned long long)questGiverSpawnGuid, questId,
-            rewardItemChoiceId, ok ? "OK (abgegeben)" : "FEHLER (siehe Server.log)");
+            "rewardItemEntry %u): %s.", accountId, (unsigned long long)questGiverSpawnGuid, questId,
+            rewardItemEntry, ok ? "OK (abgegeben)" : "FEHLER (siehe Server.log)");
         return true;
     }
 

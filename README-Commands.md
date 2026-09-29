@@ -98,7 +98,7 @@ abdecken.
 | Befehl | Wirkung |
 |---|---|
 | `.bottest questaccept <accountId> <questGiverSpawnGuid> <questId>` | Nimmt eine Quest an (ruft dieselben `Player`-Methoden wie der echte Opcode-Handler auf). |
-| `.bottest questturnin <accountId> <questGiverSpawnGuid> <questId> [rewardItemChoiceId]` | Gibt eine abgeschlossene Quest ab. |
+| `.bottest questturnin <accountId> <questGiverSpawnGuid> <questId> [rewardItemEntry]` | Gibt eine abgeschlossene Quest ab. `rewardItemEntry` ist der ECHTE Item-Entry (`item_template.entry`) der gewuenschten Auswahl-Belohnung, KEIN 0-basierter Index - 0/leer nur bei Quests ohne Auswahl-Belohnung. |
 | `.bottest queststatus <accountId> <questId>` | Zeigt den rohen `QuestStatus`-Wert. |
 
 ### Aktive Debug-/Diagnose-Werkzeuge (neu, Runde 6)
