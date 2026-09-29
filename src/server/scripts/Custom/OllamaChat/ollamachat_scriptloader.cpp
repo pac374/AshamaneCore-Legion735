@@ -32,7 +32,7 @@ EndScriptData */
 
 #include "ScriptMgr.h"
 #include "Player.h"
-#include "BotMgr.h"
+#include "../Bots/BotMgr.h"
 #include "OllamaChatMgr.h"
 #include "SharedDefines.h"
 

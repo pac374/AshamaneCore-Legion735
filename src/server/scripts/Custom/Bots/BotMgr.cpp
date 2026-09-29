@@ -2387,7 +2387,14 @@ bool BotMgr::TriggerLfgPoolFillOnce()
                 if (!hasRealMember)
                     continue;
 
-                LfgQueueRoleCount const roleCount = LFGMgr::GetRoleCountByQueueId(queueId);
+                // Explizit qualifiziert (nicht nur "LfgQueueRoleCount"): LFGMgr.h deklariert im GLOBALEN
+                // Namespace zusaetzlich ein unabhaengiges, nie definiertes "struct LfgQueueRoleCount;"
+                // (Vorwaertsdeklaration, vermutlich fuer einen anderen/aelteren Zweck) - das echte, in
+                // LFGQueue.h definierte Struct liegt in namespace lfg. Mit der obigen "using namespace
+                // lfg;" sind beide Namen im selben effektiven Suchbereich sichtbar, was MSVC (C2872) als
+                // mehrdeutig ablehnt; die explizite Qualifikation entfernt die Mehrdeutigkeit eindeutig
+                // zugunsten des echten, vollstaendigen Typs.
+                lfg::LfgQueueRoleCount const roleCount = LFGMgr::GetRoleCountByQueueId(queueId);
                 bool missingTank = roleCount.minTanks > 0 && !(presentRoles & PLAYER_ROLE_TANK);
                 bool missingHealer = roleCount.minHealers > 0 && !(presentRoles & PLAYER_ROLE_HEALER);
 
