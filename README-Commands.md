@@ -28,6 +28,10 @@ abdecken.
 - **DB-Spawn-Ids**: `attack`, `loot`, `questaccept` und `questturnin` erwarten `creature.guid` (die
   DB-Spawn-Id, NICHT die laufzeit-volle `ObjectGuid`) als Ziel-Identifikator. Diese Id vorher per
   `.bottest findnpc` ermitteln (siehe unten) statt sie manuell per SQL nachzuschlagen.
+- **Master-Schalter `Playerbots.Enable`** (neu, `worldserver.conf`, Default `1`): schaltet den
+  `BotMgr::Tick()`-Heartbeat global ab, ohne eingeloggte Bots auszuloggen (sie frieren einfach ein) -
+  per `.reload config` zur Laufzeit anwendbar, kein Serverneustart noetig. `.bottest ...`-Befehle
+  funktionieren unabhaengig vom Schalter weiter (rufen BotMgr-Methoden direkt auf).
 
 ---
 

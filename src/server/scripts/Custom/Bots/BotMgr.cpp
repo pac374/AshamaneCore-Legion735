@@ -17,6 +17,7 @@
 
 #include "BotMgr.h"
 #include "BotCharacter.h"
+#include "Config.h"
 #include "Log.h"
 #include "WorldSession.h"
 #include "AccountMgr.h"
@@ -260,6 +261,18 @@ Player* BotMgr::GetBotPlayer(uint32 accountId) const
 {
     auto itr = _botSessions.find(accountId);
     return (itr != _botSessions.end() && itr->second.Session) ? itr->second.Session->GetPlayer() : nullptr;
+}
+
+void BotMgr::LoadConfig()
+{
+    bool wasEnabled = _moduleEnabled;
+    _moduleEnabled = sConfigMgr->GetBoolDefault("Playerbots.Enable", true);
+
+    if (wasEnabled != _moduleEnabled)
+        TC_LOG_INFO("scripts.bots", "BotMgr::LoadConfig: Playerbots.Enable=%d - Tick()-Heartbeat wird ab "
+            "sofort %s (bereits eingeloggte Bots %s, '.bottest ...'-Befehle bleiben unabhaengig davon "
+            "nutzbar).", _moduleEnabled, _moduleEnabled ? "fortgesetzt" : "uebersprungen",
+            _moduleEnabled ? "laufen normal weiter" : "frieren ein, kein Logout/Datenverlust");
 }
 
 void BotMgr::Tick(uint32 diff)

@@ -362,6 +362,20 @@ public:
     // ruft NUR ProcessQueryCallbacks() auf, NIEMALS Update() (siehe Runde A).
     void Tick(uint32 diff);
 
+    // --- Master-Schalter "Playerbots.Enable" (Runde 8, Kontrollzentrum) -------
+    //
+    // Liest den Konfigurationswert bei Start UND bei jedem '.reload config' neu ein (siehe
+    // bot_scriptloader.cpp WorldScript::OnConfigLoad(), identisches Muster wie
+    // OllamaChatMgr::LoadConfig()) - kein Serverneustart fuer eine Umschaltung noetig.
+    void LoadConfig();
+
+    // true = BotMgr::Tick() soll normal weiterlaufen (Default). false = bot_scriptloader.cpp
+    // ueberspringt den Tick()-Aufruf komplett fuer diesen World-Update - bereits eingeloggte Bots
+    // frieren einfach ein (kein Logout, kein Datenverlust), GM-Befehle unter '.bottest ...' bleiben
+    // unabhaengig davon weiterhin einzeln nutzbar (rufen BotMgr-Methoden direkt auf, nicht ueber
+    // Tick()).
+    bool IsModuleEnabled() const { return _moduleEnabled; }
+
     // --- Runde N (27.09.2026): Fix fuer den Runde-M-Shutdown-Absturz ---------
     //
     // Muss aus WorldScript::OnShutdown() aufgerufen werden (bot_scriptloader.cpp),
@@ -1170,6 +1184,11 @@ private:
 
     // Absichtlich leer in dieser Runde - kein Bot kann derzeit angelegt werden.
     std::unordered_map<ObjectGuid, std::unique_ptr<IBotCharacter>> _bots;
+
+    // Siehe LoadConfig()/IsModuleEnabled() oben - Default true, damit ein Server ohne diesen neuen
+    // Konfigurationsschluessel (alte worldserver.conf ohne 'Playerbots.Enable') sich exakt wie vor
+    // dieser Runde verhaelt (kein stilles Abschalten durch Config-Drift).
+    bool _moduleEnabled = true;
 
     // Runde B: eine socketlose WorldSession pro Bot-Account, NIE ueber
     // World::AddSession() registriert (Minimal-Footprint-Entscheidung Runde A).
