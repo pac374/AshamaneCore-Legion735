@@ -43,11 +43,9 @@
 //   - KEIN Chunked-Transfer-Encoding-Support - es wird ein einzelner, vollstaendiger
 //     Content-Length-Response-Body erwartet (das ist exakt, was Ollamas /api/generate mit "stream":false
 //     liefert - siehe OllamaChatMgr.cpp).
-//   - KEIN explizites Timeout in dieser ersten Runde - ein haengender Ollama-Server wuerde den
-//     Hintergrund-Thread (siehe OllamaChatMgr::WorkerThreadMain()) unbegrenzt blockieren. Da JEDE Anfrage
-//     einen EIGENEN, kurzlebigen std::thread bekommt (nie den World-Update-Thread), ist der Blast-Radius
-//     auf diesen einen Thread begrenzt - kein Serverabsturz/-hänger, aber ein sauberes Timeout waere ein
-//     sinnvoller naechster Ausbauschritt.
+//   - Timeout (seit 03.10.2026, OI-018): PostJson() hat eine Gesamtfrist (Parameter timeoutSeconds,
+//     konfigurierbar ueber OllamaChat.TimeoutSeconds) plus SO_SNDTIMEO/SO_RCVTIMEO am Socket; ein
+//     haengender Ollama-Server blockiert so keinen Anfrage-Slot mehr dauerhaft.
 // ---------------------------------------------------------------------------
 
 #include <cstdint>
@@ -64,8 +62,12 @@ public:
     //
     // WICHTIG: blockierend - NIEMALS auf dem World-Update-Thread aufrufen, nur aus einem dedizierten
     // Hintergrund-Thread (siehe OllamaChatMgr::WorkerThreadMain()).
+    //
+    // timeoutSeconds: harte Obergrenze fuer die GESAMTE Anfrage (Senden + Warten + Lesen); bei
+    // Ueberschreitung false. Verhindert, dass ein haengender Ollama-Server einen der Anfrage-Slots
+    // dauerhaft blockiert (OI-018).
     static bool PostJson(std::string const& host, uint16_t port, std::string const& path,
-        std::string const& jsonBody, std::string& outResponseBody);
+        std::string const& jsonBody, std::string& outResponseBody, uint32_t timeoutSeconds = 30);
 };
 
 #endif // OLLAMA_HTTP_CLIENT_H

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -47,17 +47,24 @@
 #include "SpellMgr.h"
 #include "SpellInfo.h"
 #include "SpellHistory.h"
+#include "AreaTrigger.h"
+#include "AreaTriggerTemplate.h"
+#include "ThreatManager.h"
 #include "Util.h"
 #include "QuestDef.h"
 #include "DynamicObject.h"
 #include "SpellAuras.h"
 #include "CellImpl.h"
 #include "GridNotifiersImpl.h"
+#include <cctype>
+#include <map>
 #include <cmath>
+#include <cstdlib>
 #include <sstream>
 #include <iomanip>
 #include <vector>
 #include <unordered_set>
+#include <set>
 #include <algorithm>
 
 BotMgr* BotMgr::instance()
@@ -208,9 +215,20 @@ bool BotMgr::RequestCreateBotCharacter(uint32 accountId, std::string const& char
     // wuerde (siehe CharacterPackets.h CharacterCreateInfo-Konstruktor) -
     // Read() wird NICHT aufgerufen, wir setzen die Felder direkt. Verwendet
     // normalizedName (bereits oben validiert), nicht das rohe charName-Argument.
+    // OI-051: gueltiges Aussehen suchen (Todesritter/Daemonenjaeger lehnt der Server mit 0/0/0 ab)
+    uint8 skin = 0, face = 0, hairStyle = 0, hairColor = 0, facialHair = 0;
+    std::array<uint8, PLAYER_CUSTOM_DISPLAY_SIZE> customDisplay = { };
+    if (!Player::FindValidAppearance(race, charClass, sex, skin, face, hairStyle, hairColor, facialHair, customDisplay))
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::RequestCreateBotCharacter: fuer Volk %u/Klasse %u/Geschlecht %u wurde kein "
+            "gueltiges Aussehen gefunden - versuche 0/0/0 (Server wird die Anlage vermutlich ablehnen).", uint32(race), uint32(charClass), uint32(sex));
+        skin = face = hairStyle = hairColor = facialHair = 0;
+        customDisplay = { };
+    }
     auto createInfo = std::make_shared<WorldPackets::Character::CharacterCreateInfo>(
         normalizedName, race, charClass, sex,
-        /*skin*/ 0, /*face*/ 0, /*hairStyle*/ 0, /*hairColor*/ 0, /*facialHair*/ 0, /*outfitId*/ 0);
+        skin, face, hairStyle, hairColor, facialHair, /*outfitId*/ 0);
+    createInfo->CustomDisplay = customDisplay;
 
     WorldPacket emptyPacket(CMSG_CREATE_CHARACTER, 0);
     WorldPackets::Character::CreateCharacter charCreate(std::move(emptyPacket));
@@ -251,6 +269,24 @@ bool BotMgr::RequestBotLogin(uint32 accountId)
     return true;
 }
 
+bool BotMgr::RequestBotLoginExistingAccount(uint32 accountId)
+{
+    std::string accountName;
+    if (accountId == 0 || !AccountMgr::GetName(accountId, accountName))
+    {
+        TC_LOG_ERROR("scripts.bots", "BotMgr::RequestBotLoginExistingAccount: Account %u existiert nicht.", accountId);
+        return false;
+    }
+
+    BotSessionEntry& entry = _botSessions[accountId];
+    if (!entry.Session)
+    {
+        entry.Session = CreateBotWorldSession(accountId, accountName);
+        entry.State = BotCharacterState::STATE_UNINITIALIZED;
+    }
+    return RequestBotLogin(accountId);
+}
+
 BotCharacterState BotMgr::GetBotSessionState(uint32 accountId) const
 {
     auto itr = _botSessions.find(accountId);
@@ -267,16 +303,79 @@ void BotMgr::LoadConfig()
 {
     bool wasEnabled = _moduleEnabled;
     _moduleEnabled = sConfigMgr->GetBoolDefault("Playerbots.Enable", true);
+    _combatDebug = sConfigMgr->GetBoolDefault("Playerbots.Debug.Combat", false);
 
     if (wasEnabled != _moduleEnabled)
         TC_LOG_INFO("scripts.bots", "BotMgr::LoadConfig: Playerbots.Enable=%d - Tick()-Heartbeat wird ab "
             "sofort %s (bereits eingeloggte Bots %s, '.bottest ...'-Befehle bleiben unabhaengig davon "
             "nutzbar).", _moduleEnabled, _moduleEnabled ? "fortgesetzt" : "uebersprungen",
             _moduleEnabled ? "laufen normal weiter" : "frieren ein, kein Logout/Datenverlust");
+
+    // --- OI-020: Autostart nach Serverneustart ---------------------------------------------------
+    // Playerbots.Autostart.Enable (Default 0), .AccountIds (Liste "30,31,40-60"; Bereiche "a-b" erlaubt),
+    // .PerSecond (Logins pro Sekunde, Default 2, 1-50), .DelaySeconds (Wartezeit nach Serverstart, Default 15).
+    // Die Warteschlange wird nur EINMAL pro Prozess gefuellt (nicht bei '.reload config').
+    _autostartPerSecond = uint32(std::max<int32>(1, std::min<int32>(50, sConfigMgr->GetIntDefault("Playerbots.Autostart.PerSecond", 2))));
+    _autostartDelayMs = uint32(std::max<int32>(0, std::min<int32>(3600, sConfigMgr->GetIntDefault("Playerbots.Autostart.DelaySeconds", 15)))) * 1000;
+    if (!_autostartQueued && sConfigMgr->GetBoolDefault("Playerbots.Autostart.Enable", false))
+    {
+        _autostartQueued = true;
+        std::string const list = sConfigMgr->GetStringDefault("Playerbots.Autostart.AccountIds", "");
+        std::stringstream ss(list);
+        std::string token;
+        while (std::getline(ss, token, ','))
+        {
+            token.erase(std::remove_if(token.begin(), token.end(), [](unsigned char c) { return std::isspace(c); }), token.end());
+            if (token.empty())
+                continue;
+            uint32 from = 0, to = 0;
+            std::string::size_type const dash = token.find('-');
+            if (dash == std::string::npos)
+                from = to = uint32(std::strtoul(token.c_str(), nullptr, 10));
+            else
+            {
+                from = uint32(std::strtoul(token.substr(0, dash).c_str(), nullptr, 10));
+                to = uint32(std::strtoul(token.substr(dash + 1).c_str(), nullptr, 10));
+            }
+            if (from == 0 || to < from || to - from > 5000)
+            {
+                TC_LOG_ERROR("scripts.bots", "BotMgr::LoadConfig: Autostart.AccountIds-Eintrag '%s' ungueltig - uebersprungen.", token.c_str());
+                continue;
+            }
+            for (uint32 id = from; id <= to; ++id)
+                if (std::find(_autostartQueue.begin(), _autostartQueue.end(), id) == _autostartQueue.end())
+                    _autostartQueue.push_back(id);
+        }
+        TC_LOG_INFO("scripts.bots", "BotMgr::LoadConfig: Autostart aktiv - %u Bot-Accounts in der Warteschlange, "
+            "%u pro Sekunde, Start nach %u s.", uint32(_autostartQueue.size()), _autostartPerSecond,
+            _autostartDelayMs / 1000);
+    }
 }
 
 void BotMgr::Tick(uint32 diff)
 {
+    // OI-020: gestaffelter Autostart - nach der Startverzoegerung pro Sekunde _autostartPerSecond Logins
+    // ausloesen (CharEnum -> Login laeuft danach wie bei '.bottest login' unten in der Schleife).
+    if (_autostartNext < _autostartQueue.size())
+    {
+        _autostartAccumMs += diff;
+        if (_autostartAccumMs >= _autostartDelayMs + 1000)
+        {
+            _autostartAccumMs -= 1000;
+            for (uint32 i = 0; i < _autostartPerSecond && _autostartNext < _autostartQueue.size(); ++i)
+            {
+                uint32 const accountId = _autostartQueue[_autostartNext++];
+                if (GetBotPlayer(accountId))
+                    continue; // bereits online (z. B. per .bottest)
+                if (RequestBotLoginExistingAccount(accountId))
+                    ++_autostartStartedLogins;
+            }
+            if (_autostartNext >= _autostartQueue.size())
+                TC_LOG_INFO("scripts.bots", "BotMgr::Tick: Autostart abgeschlossen - %u Logins ausgeloest (von %u Accounts).",
+                    _autostartStartedLogins, uint32(_autostartQueue.size()));
+        }
+    }
+
     // Bewusst NUR ProcessQueryCallbacks() - NIEMALS Session->Update(), das bei
     // socket=nullptr in IsConnectionIdle()->CloseSocket() abstuerzen wuerde
     // (Runde-A-Befund, siehe Kopfkommentar).
@@ -296,6 +395,26 @@ void BotMgr::Tick(uint32 diff)
             if (!entry.Session->_legitCharacters.empty())
             {
                 ObjectGuid charGuid = *entry.Session->_legitCharacters.begin();
+
+                // OI-051: Todesritter starten in Map 609 (Ebon Hold, Startszenario); ein Bot ohne Client kommt dort nie
+                // vollstaendig in die Welt (Player ist nach dem Login nicht IsInWorld). Vor dem Login auf die
+                // Hauptstadt der Fraktion umsetzen (nur beim allerersten Login, solange die Position noch auf 609 steht).
+                if (QueryResult startMap = CharacterDatabase.PQuery("SELECT map, race FROM characters WHERE guid = %u",
+                    uint32(charGuid.GetCounter())))
+                {
+                    Field* sf = (*startMap).Fetch();
+                    if (sf[0].GetUInt16() == 609)
+                    {
+                        bool const alliance = Player::TeamForRace(sf[1].GetUInt8()) == ALLIANCE;
+                        CharacterDatabase.DirectPExecute("UPDATE characters SET map = %u, zone = %u, position_x = %f, position_y = %f, "
+                            "position_z = %f, orientation = %f WHERE guid = %u",
+                            alliance ? 0u : 1u, alliance ? 1519u : 1637u, alliance ? -8842.09f : 1629.36f,
+                            alliance ? 626.358f : -4373.39f, alliance ? 94.0866f : 31.2564f, alliance ? 3.61363f : 3.54839f,
+                            uint32(charGuid.GetCounter()));
+                        TC_LOG_INFO("scripts.bots", "BotMgr::Tick: Account %u - Todesritter-Startposition (Map 609) vor dem Login auf %s gesetzt.",
+                            accountId, alliance ? "Sturmwind" : "Orgrimmar");
+                    }
+                }
 
                 WorldPacket loginPacket(CMSG_PLAYER_LOGIN, 0);
                 WorldPackets::Character::PlayerLogin playerLogin(std::move(loginPacket));
@@ -330,6 +449,7 @@ void BotMgr::Tick(uint32 diff)
             // Autonomer Dungeon-Clear-Modus (siehe SetDungeonClearMode()-Kommentar): eigener ~1s-
             // Akkumulator, tut fuer die meisten Bots nichts (DungeonClearActive default false).
             ProcessDungeonClear(accountId, diff);
+            ProcessBotGroupInstance(accountId, diff);
 
             // --- Runde R (27.09.2026): reiner Idle-Diagnose-Platzhalter --------
             // Bewusst KEINE Movement-/MotionMaster-Logik (explizit Runde S
@@ -666,13 +786,25 @@ bool BotMgr::TeleportBot(uint32 accountId, uint32 mapId, float x, float y, float
 
     botSession->HandleMoveWorldportAck();
 
+    // OI-017 (03.10.2026, Bot-Test): Bei einem Teleport auf DIESELBE Map wartet der Core auf das
+    // MSG_MOVE_TELEPORT_ACK des Clients, bevor die Position uebernommen wird - ein Bot sendet das nie, der
+    // Bot blieb stehen, obwohl "ZIEL ERREICHT" gemeldet wurde (Check verglich nur die Map-Id). Hier den
+    // Nah-Teleport selbst abschliessen.
+    if (sourceMapId == mapId && player->IsInWorld() && player->IsBeingTeleportedNear())
+    {
+        player->SetSemaphoreTeleportNear(false);
+        player->UpdatePosition(x, y, z, orientation, true);
+        TC_LOG_INFO("scripts.bots", "BotMgr::TeleportBot: Account %u - Nah-Teleport (gleiche Map) manuell abgeschlossen.", accountId);
+    }
+
     // Map::AddPlayerToMap() selbst liegt in MovementHandler.cpp (andere Compilation-Unit) und
     // gibt BotMgr keinen direkten Rueckgabewert - als Ersatzindikator (siehe lcf2r90-Empfehlung
     // Punkt 4 und BotMgr.h-Kommentar) wird hier player->GetMapId() gegen das gewuenschte Ziel
     // verglichen: weicht die tatsaechliche Map vom Ziel ab (z.B. weil einer der beiden
     // Homebind-Fallback-Pfade aus lcf2r90, Zeilen 88-93/114-121, gegriffen hat), ist das ein
     // starkes Indiz fuer einen fehlgeschlagenen Kartenwechsel statt eines erfolgreichen.
-    bool arrivedAtTarget = player->IsInWorld() && player->GetMapId() == mapId;
+    bool arrivedAtTarget = player->IsInWorld() && player->GetMapId() == mapId
+        && (sourceMapId != mapId || (std::fabs(player->GetPositionX() - x) < 5.0f && std::fabs(player->GetPositionY() - y) < 5.0f));
     TC_LOG_INFO("scripts.bots", "BotMgr::TeleportBot: Account %u - nach HandleMoveWorldportAck(): IsInWorld()=%d, "
         "GetMapId()=%u (Ziel war %u), Position (%f, %f, %f) - %s.", accountId, player->IsInWorld(),
         player->GetMapId(), mapId, player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(),
@@ -1421,7 +1553,16 @@ namespace
     // Sucht ein einzelnes zufaelliges item_entry aus bot_equipment_pool, faellt bei leerem
     // Ergebnis Stufe fuer Stufe ab (analog mod-playerbots' Fallback-Schleife, R134 Abschnitt 2.2).
     // Gibt 0 zurueck, wenn selbst bei Stufe 1 ("schlecht") kein Treffer existiert.
-    uint32 PickPoolItemWithFallback(uint8 band, uint8 startTier, uint8 itemClass,
+    // OI-051: Bewerber werden gegen den Bot geprueft (Player::CanUseItem: Klasse, Volk, Stufe, Fertigkeit),
+    // sonst landeten Items mit Klassen-/Stufenbeschraenkung ("CANT_EQUIP_EVER"/"LEVEL") im Rucksack. Der
+    // Pool-Band reicht ueber mehrere Stufen (z. B. 20-49): zusaetzlich nur Items bis zur Stufe des Bots.
+    // Ziel-Itemlevel fuer die laufende Provisionierung (0 = aus): gesetzt/zurueckgesetzt von
+    // BotMgr::ProvisionBot() (Weltserver-Update ist single-threaded). Mit Ziel-Ilvl werden nur Items
+    // >= Ziel gewaehlt, ueber ALLE Qualitaetsstufen (4 -> 1); gibt es keine, faellt die Wahl auf die
+    // normale Pool-Logik zurueck.
+    uint16 g_botPoolMinIlvl = 0;
+
+    uint32 PickPoolItemWithFallback(Player const* player, uint8 band, uint8 startTier, uint8 itemClass,
         std::vector<uint8> const& subclasses, std::vector<uint8> const& invTypes)
     {
         if (subclasses.empty() || invTypes.empty())
@@ -1430,15 +1571,29 @@ namespace
         std::string subIn = BuildInClauseU8(subclasses);
         std::string invIn = BuildInClauseU8(invTypes);
 
-        for (int tier = int(startTier); tier >= 1; --tier)
+        for (int pass = 0; pass < 2; ++pass)
         {
-            QueryResult result = WorldDatabase.PQuery(
-                "SELECT item_entry FROM bot_equipment_pool WHERE level_band = %u AND pool_quality = %u "
-                "AND item_class = %u AND item_subclass IN (%s) AND inventory_type IN (%s) "
-                "ORDER BY RAND() LIMIT 1",
-                uint32(band), uint32(tier), uint32(itemClass), subIn.c_str(), invIn.c_str());
-            if (result)
-                return (*result)[0].GetUInt32();
+            uint32 const minIlvl = (pass == 0) ? uint32(g_botPoolMinIlvl) : 0;
+            if (pass == 1 && g_botPoolMinIlvl == 0)
+                break; // ohne Ziel-Ilvl gibt es keinen zweiten Durchlauf
+            for (int tier = (minIlvl ? 4 : int(startTier)); tier >= 1; --tier)
+            {
+                QueryResult result = WorldDatabase.PQuery(
+                    "SELECT item_entry FROM bot_equipment_pool WHERE level_band = %u AND pool_quality = %u "
+                    "AND item_class = %u AND item_subclass IN (%s) AND inventory_type IN (%s) "
+                    "AND required_level <= %u AND item_level >= %u ORDER BY RAND() LIMIT 40",
+                    uint32(band), uint32(tier), uint32(itemClass), subIn.c_str(), invIn.c_str(),
+                    uint32(player->getLevel()), minIlvl);
+                if (!result)
+                    continue;
+                do
+                {
+                    uint32 entry = (*result)[0].GetUInt32();
+                    ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entry);
+                    if (proto && player->CanUseItem(proto) == EQUIP_ERR_OK)
+                        return entry;
+                } while (result->NextRow());
+            }
         }
         return 0;
     }
@@ -1506,7 +1661,7 @@ bool BotMgr::EquipBotFromPool(uint32 accountId)
         std::vector<uint8> const& invTypes)
     {
         ++slotsAttempted;
-        uint32 entry = PickPoolItemWithFallback(band, tier, itemClass, subclasses, invTypes);
+        uint32 entry = PickPoolItemWithFallback(player, band, tier, itemClass, subclasses, invTypes);
         if (!entry)
         {
             TC_LOG_INFO("scripts.bots", "BotMgr::EquipBotFromPool: Account %u - Slot '%s': kein passendes "
@@ -1553,11 +1708,11 @@ bool BotMgr::EquipBotFromPool(uint32 accountId)
     bool wantsTwoHand = !twoHandSub.empty() && (oneHandSub.empty() || urand(0, 1) == 0);
     uint32 mainHandEntry = 0;
     if (wantsTwoHand)
-        mainHandEntry = PickPoolItemWithFallback(band, tier, 2, twoHandSub, {17});
+        mainHandEntry = PickPoolItemWithFallback(player, band, tier, 2, twoHandSub, {17});
     if (!mainHandEntry && !oneHandSub.empty())
-        mainHandEntry = PickPoolItemWithFallback(band, tier, 2, oneHandSub, {13, 15, 21, 26});
+        mainHandEntry = PickPoolItemWithFallback(player, band, tier, 2, oneHandSub, {13, 15, 21, 26});
     if (!mainHandEntry && !twoHandSub.empty())
-        mainHandEntry = PickPoolItemWithFallback(band, tier, 2, twoHandSub, {17});
+        mainHandEntry = PickPoolItemWithFallback(player, band, tier, 2, twoHandSub, {17});
 
     ++slotsAttempted;
     bool equippedTwoHand = false;
@@ -1592,22 +1747,22 @@ bool BotMgr::EquipBotFromPool(uint32 accountId)
         char const* offhandLabel = "Offhand";
         if (BotClassCanUseShield(cls) && urand(0, 1) == 0)
         {
-            offhandEntry = PickPoolItemWithFallback(band, tier, 4, {6}, {14});
+            offhandEntry = PickPoolItemWithFallback(player, band, tier, 4, {6}, {14});
             offhandLabel = "Offhand(Schild)";
         }
         if (!offhandEntry && BotClassCanDualWieldWeapon(cls) && !oneHandSub.empty())
         {
-            offhandEntry = PickPoolItemWithFallback(band, tier, 2, oneHandSub, {22});
+            offhandEntry = PickPoolItemWithFallback(player, band, tier, 2, oneHandSub, {22});
             offhandLabel = "Offhand(Waffe)";
         }
         if (!offhandEntry && BotClassCanUseShield(cls))
         {
-            offhandEntry = PickPoolItemWithFallback(band, tier, 4, {6}, {14});
+            offhandEntry = PickPoolItemWithFallback(player, band, tier, 4, {6}, {14});
             offhandLabel = "Offhand(Schild)";
         }
         if (!offhandEntry && BotClassCanUseHoldable(cls))
         {
-            offhandEntry = PickPoolItemWithFallback(band, tier, 4, {0}, {23});
+            offhandEntry = PickPoolItemWithFallback(player, band, tier, 4, {0}, {23});
             offhandLabel = "Offhand(Holdable)";
         }
 
@@ -2367,7 +2522,7 @@ bool BotMgr::IsBotPlayerGuid(ObjectGuid guid) const
     for (auto const& [accountId, entry] : _botSessions)
     {
         if (entry.Session && entry.Session->GetPlayer() && entry.Session->GetPlayer()->GetGUID() == guid)
-            return true;
+            return !_lfgTestRealAccounts.count(accountId); // Test-Konten gelten als echte Spieler
     }
     return false;
 }
@@ -2382,6 +2537,10 @@ bool BotMgr::TriggerLfgPoolFillOnce()
         LfgQueueContainer const& queues = sLFGMgr->GetQueuesForTeam(team);
         for (auto const& [queueId, queue] : queues)
         {
+            // OI-023: LFR-Fluegel bedient HandleLfrDemand() (vorgebaute Raidgruppe), nicht der Einzel-Fueller
+            if (LFGDungeonData const* lfrCheck = sLFGMgr->GetLFGDungeon(queueId))
+                if (lfrCheck->subtype == LFG_SUBTYPE_LFR)
+                    continue;
             LfgQueueDataContainer const& queueData = queue.GetQueueDataStore();
             for (auto const& [candidateGuid, data] : queueData)
             {
@@ -2492,6 +2651,13 @@ void BotMgr::AdvanceLfgFillerBots()
         }
 
         Player* botPlayer = itr->second.Session->GetPlayer();
+        if (botPlayer && !botPlayer->IsInWorld() && botPlayer->IsBeingTeleportedFar())
+        {
+            // Fern-Teleport (LFG-Dungeon) wurde von einem anderen Bot im selben Tick ausgeloest: der Spieler ist waehrenddessen nicht in
+            // der Welt und wuerde ohne Client nie MSG_MOVE_WORLDPORT_ACK senden - hier abschliessen, Eintrag bleibt fuer die Zustandspruefung.
+            itr->second.Session->HandleMoveWorldportAck();
+            continue;
+        }
         if (!botPlayer || !botPlayer->IsInWorld())
         {
             toErase.push_back(accountId);
@@ -2524,6 +2690,22 @@ void BotMgr::AdvanceLfgFillerBots()
             TC_LOG_INFO("scripts.bots", "BotMgr::AdvanceLfgFillerBots: Account %u - IsBeingTeleportedFar()=true "
                 "(LFG-Dungeon-Teleport), rufe manuell HandleMoveWorldportAck() auf.", accountId);
             itr->second.Session->HandleMoveWorldportAck();
+        }
+
+        if (state == LFG_STATE_DUNGEON)
+        {
+            // Der Core teleportiert nur NEU hinzugekommene Spieler; bereits gruppierte Mitglieder fordern den Teleport sonst per
+            // CMSG_LFG_TELEPORT (Schaltflaeche "Dungeon betreten") an - ein Bot hat keinen Client, also hier nachholen.
+            Group* lfgGroup = botPlayer->GetGroup();
+            LFGDungeonData const* lfgDungeon = lfgGroup ? sLFGMgr->GetLFGDungeon(sLFGMgr->GetDungeon(lfgGroup->GetGUID())) : nullptr;
+            if (lfgDungeon && botPlayer->GetMapId() != uint32(lfgDungeon->map) && !botPlayer->IsBeingTeleported())
+            {
+                sLFGMgr->TeleportPlayer(botPlayer, false, true);
+                TC_LOG_INFO("scripts.bots", "BotMgr::AdvanceLfgFillerBots: Account %u - LFG-Teleport in Map %u nachgeholt (IsBeingTeleportedFar=%u).",
+                    accountId, uint32(lfgDungeon->map), uint32(botPlayer->IsBeingTeleportedFar()));
+                if (botPlayer->IsBeingTeleportedFar())
+                    itr->second.Session->HandleMoveWorldportAck();
+            }
         }
 
         if (state == LFG_STATE_DUNGEON || state == LFG_STATE_FINISHED_DUNGEON)
@@ -2559,6 +2741,7 @@ void BotMgr::ProcessLfgPoolFillTick(uint32 diff)
         return;
 
     _lfgFillTickAccumMs = 0;
+    HandleLfrDemand();
     TriggerLfgPoolFillOnce();
 }
 
@@ -3177,6 +3360,56 @@ namespace
         }
         return found;
     }
+
+    // OI-017 (03.10.2026, Bot-Test): Der Namens-Resolver waehlt bei mehrdeutigen Namen die HOECHSTE Id
+    // (z. B. Frostbolt 228597), die Level-1-Bots kennen aber eine ANDERE Id desselben Namens (Frostbolt 116,
+    // Slam 1464, Cobra Shot 193455): player->HasSpell(HoechsteId) war false, jeder Rotationsschritt wurde
+    // uebersprungen, kein Bot hat im Kampf gezaubert. Loesung: pro Spieler aus ALLEN Namenstreffern die Id
+    // waehlen, die der Spieler tatsaechlich kennt. Die Kandidatenlisten werden pro (Familie, Name) einmal
+    // aus dem Spell.db2 gebaut und gecacht.
+    uint32 FindKnownSpellIdByName(Player const* player, std::string const& englishName, uint32 spellFamily, uint32 preferredId)
+    {
+        if (preferredId && player->HasSpell(preferredId))
+            return preferredId;
+
+        static std::unordered_map<std::string, std::vector<uint32>> candidateCache;
+        std::string const cacheKey = std::to_string(spellFamily) + ":" + englishName;
+        auto itr = candidateCache.find(cacheKey);
+        if (itr == candidateCache.end())
+        {
+            std::wstring wanted;
+            Utf8toWStr(englishName, wanted);
+            wstrToLower(wanted);
+
+            std::vector<uint32> candidates;
+            // OI-023: ALLE Namenstreffer sammeln (nicht nur die der Klassenfamilie) - z.B. Agony 980 hat nicht die Familie
+            // des Warlock-Treffers 231792; die Auswahl unten nimmt ohnehin nur eine vom Spieler gekannte Id.
+            for (int pass = 1; pass < 2 && candidates.empty(); ++pass)
+            {
+                for (uint32 id = 0; id < sSpellMgr->GetSpellInfoStoreSize(); ++id)
+                {
+                    SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(id);
+                    if (!spellInfo || !spellInfo->SpellName || !spellInfo->SpellName->Str[LOCALE_enUS])
+                        continue;
+                    if (pass == 0 && spellInfo->SpellFamilyName != spellFamily)
+                        continue;
+                    std::wstring candidate;
+                    Utf8toWStr(spellInfo->SpellName->Str[LOCALE_enUS], candidate);
+                    wstrToLower(candidate);
+                    if (candidate == wanted)
+                        candidates.push_back(id);
+                }
+            }
+            itr = candidateCache.emplace(cacheKey, std::move(candidates)).first;
+        }
+
+        // Hoechste bekannte Id zuerst (aktuellste Version), sonst irgendeine bekannte.
+        uint32 best = 0;
+        for (uint32 id : itr->second)
+            if (id > best && player->HasSpell(id))
+                best = id;
+        return best;
+    }
 }
 
 uint32 BotMgr::ResolveSpellIdByName(std::string const& englishName, uint32 spellFamily) const
@@ -3312,8 +3545,400 @@ bool BotMgr::EvaluateBotRotationCondition(Player* player, Unit* target, BotRotat
     }
 }
 
+namespace
+{
+    // Plan-Schritt 3: Spott je Klasse (Namen aus dem Spell.db2 per FindKnownSpellIdByName, keine geratenen IDs)
+    bool BotTryTaunt(Player* bot, Unit* target)
+    {
+        if (!target || !target->IsAlive())
+            return false;
+        Unit* victim = target->GetVictim();
+        if (!victim || victim == bot)
+            return false;
+        char const* name = nullptr;
+        switch (bot->getClass())
+        {
+            case CLASS_WARRIOR: name = "Taunt"; break;
+            case CLASS_PALADIN: name = "Hand of Reckoning"; break;
+            case CLASS_DEATH_KNIGHT: name = "Dark Command"; break;
+            case CLASS_DRUID: name = "Growl"; break;
+            case CLASS_MONK: name = "Provoke"; break;
+            case CLASS_DEMON_HUNTER: name = "Torment"; break;
+            default: return false;
+        }
+        uint32 const spellId = FindKnownSpellIdByName(bot, name, 0, 0);
+        SpellInfo const* info = spellId ? sSpellMgr->GetSpellInfo(spellId) : nullptr;
+        if (!info || !bot->GetSpellHistory()->IsReady(info))
+            return false;
+        float const range = info->GetMaxRange(false, bot);
+        if ((range > 0.0f && bot->GetDistance(target) > range) || !bot->IsWithinLOSInMap(target))
+            return false;
+        return bot->CastSpell(target, spellId, TRIGGERED_NONE);
+    }
+
+    // Plan-Schritt 6: Wiederbelebung eines toten Gruppenmitglieds ausserhalb des Kampfes
+    bool BotTryResurrectMember(Player* bot)
+    {
+        char const* name = nullptr;
+        switch (bot->getClass())
+        {
+            case CLASS_PRIEST: name = "Resurrection"; break;
+            case CLASS_PALADIN: name = "Redemption"; break;
+            case CLASS_SHAMAN: name = "Ancestral Spirit"; break;
+            case CLASS_DRUID: name = "Revive"; break;
+            case CLASS_MONK: name = "Resuscitate"; break;
+            default: return false;
+        }
+        Group* group = bot->GetGroup();
+        if (!group)
+            return false;
+        uint32 const spellId = FindKnownSpellIdByName(bot, name, 0, 0);
+        SpellInfo const* info = spellId ? sSpellMgr->GetSpellInfo(spellId) : nullptr;
+        if (!info || !bot->GetSpellHistory()->IsReady(info))
+            return false;
+        for (GroupReference* gr = group->GetFirstMember(); gr; gr = gr->next())
+        {
+            Player* member = gr->GetSource();
+            if (!member || member == bot || member->IsAlive() || !member->IsInWorld() || member->GetMapId() != bot->GetMapId() || member->IsResurrectRequested())
+                continue;
+            float const range = info->GetMaxRange(false, bot);
+            if (bot->GetDistance(member) > (range > 0.0f ? range - 2.0f : 30.0f))
+            {
+                if (bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+                    bot->GetMotionMaster()->MovePoint(0, member->GetPositionX(), member->GetPositionY(), member->GetPositionZ(), true);
+                return true;
+            }
+            return bot->CastSpell(member, spellId, TRIGGERED_NONE);
+        }
+        return false;
+    }
+}
+
+// Plan-Schritt 3: Tank-Zielwahl - ein Gegner, der gerade ein anderes Gruppenmitglied (nicht den Tank) angreift
+Unit* BotMgr::SelectBotTankTarget(Player* bot) const
+{
+    Group* group = bot->GetGroup();
+    if (!group)
+        return nullptr;
+    Unit* best = nullptr;
+    float bestDist = 40.0f;
+    for (GroupReference* gr = group->GetFirstMember(); gr; gr = gr->next())
+    {
+        Player* member = gr->GetSource();
+        if (!member || member == bot || !member->IsInWorld() || member->GetMapId() != bot->GetMapId())
+            continue;
+        for (Unit* attacker : member->getAttackers())
+        {
+            if (!attacker || !attacker->IsAlive() || attacker->GetVictim() == bot || !bot->IsValidAttackTarget(attacker))
+                continue;
+            float const dist = bot->GetDistance(attacker);
+            if (dist < bestDist)
+            {
+                best = attacker;
+                bestDist = dist;
+            }
+        }
+    }
+    return best;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Boss-Playbook (05.10.2026, Konzept BOSS_PLAYBOOK_RECHERCHE.md, Tabellen bot_boss_* aus fixes\lcf2r173): datengetriebene Regeln je Boss
+// fuer Add-Prioritaet/-Verhalten, Aufstellung und Ausweichen. Bosse ohne Eintrag behalten das generische Verhalten.
+// Rollen-Bits: 1 Tank, 2 Heiler, 4 Nahkampf, 8 Fernkampf (= 1 << (BotRole - 1)).
+// ---------------------------------------------------------------------------------------------------
+namespace
+{
+    struct PbAdd { uint32 Add; uint8 Phase; uint8 Prio; uint8 RoleMask; uint8 Mode; };            // Mode: 0 KILL, 1 IGNORE, 2 AVOID, 3 TANK_ONLY
+    struct PbPos { uint8 Phase; uint8 Role; uint8 Anchor; int16 Angle; float Dist; float Spread; }; // Anchor: 0 BOSS, 1 BOSS_FACING_BACK, 2 ROOM_EDGE_AWAY, 3 TANK
+    struct PbAvoid { uint32 Spell; uint8 Kind; uint8 Phase; uint8 RoleMask; float Radius; };      // Kind: 0 AREATRIGGER, 1 AURA_SELF, 2 FRONTAL_CONE, 3 REAR_CONE, 4 CAST_AREA
+    struct PbPhase { uint8 Phase; uint8 Trigger; int32 Value; uint32 Ref; };                      // Trigger: 0 START, 1 HP_BELOW, 2 POWER_ZERO, 3 AURA_ON_BOSS, 4 BOSS_PASSIVE, 5 ADD_DEAD_COUNT
+    struct PbInterrupt { uint32 Caster; uint32 Spell; uint8 Prio; };                              // Caster 0 = beliebiger Wirker
+    struct PbDispel { uint32 Aura; uint8 Prio; uint8 MinStacks; };
+    struct PbTankSwap { uint32 Aura; uint8 Stacks; };
+    struct Playbook
+    {
+        uint32 Map = 0;
+        uint32 Flags = 0;
+        std::vector<PbInterrupt> Interrupts;
+        std::vector<PbDispel> Dispels;
+        std::vector<PbTankSwap> TankSwaps;
+        std::vector<PbAdd> Adds;
+        std::vector<PbPos> Pos;
+        std::vector<PbAvoid> Avoid;
+        std::vector<PbPhase> Phases;
+    };
+
+    std::unordered_map<uint32, Playbook> g_playbooks; // boss entry -> Playbook
+    bool g_playbooksLoaded = false;
+
+    uint8 PbEnum(std::string const& v, std::initializer_list<char const*> names)
+    {
+        uint8 i = 0;
+        for (char const* n : names)
+        {
+            if (v == n)
+                return i;
+            ++i;
+        }
+        return 0;
+    }
+
+    void LoadPlaybooks()
+    {
+        g_playbooksLoaded = true;
+        g_playbooks.clear();
+        if (QueryResult r = WorldDatabase.Query("SELECT boss_entry, map, flags FROM bot_boss_playbook"))
+            do
+            {
+                Field* f = r->Fetch();
+                Playbook& p = g_playbooks[f[0].GetUInt32()];
+                p.Map = f[1].GetUInt32();
+                p.Flags = f[2].GetUInt32();
+            } while (r->NextRow());
+        if (QueryResult r = WorldDatabase.Query("SELECT boss_entry, add_entry, phase, priority, role_mask, mode FROM bot_boss_add_priority"))
+            do
+            {
+                Field* f = r->Fetch();
+                auto itr = g_playbooks.find(f[0].GetUInt32());
+                if (itr != g_playbooks.end())
+                    itr->second.Adds.push_back({ f[1].GetUInt32(), f[2].GetUInt8(), f[3].GetUInt8(), f[4].GetUInt8(), PbEnum(f[5].GetString(), { "KILL", "IGNORE", "AVOID", "TANK_ONLY" }) });
+            } while (r->NextRow());
+        if (QueryResult r = WorldDatabase.Query("SELECT boss_entry, phase, role, anchor, angle_deg, distance, spread FROM bot_boss_position"))
+            do
+            {
+                Field* f = r->Fetch();
+                auto itr = g_playbooks.find(f[0].GetUInt32());
+                if (itr != g_playbooks.end())
+                    itr->second.Pos.push_back({ f[1].GetUInt8(), f[2].GetUInt8(), PbEnum(f[3].GetString(), { "BOSS", "BOSS_FACING_BACK", "ROOM_EDGE_AWAY", "TANK" }), f[4].GetInt16(), f[5].GetFloat(), f[6].GetFloat() });
+            } while (r->NextRow());
+        if (QueryResult r = WorldDatabase.Query("SELECT boss_entry, spell_id, kind, phase, radius, role_mask FROM bot_boss_avoid"))
+            do
+            {
+                Field* f = r->Fetch();
+                auto itr = g_playbooks.find(f[0].GetUInt32());
+                if (itr != g_playbooks.end())
+                    itr->second.Avoid.push_back({ f[1].GetUInt32(), PbEnum(f[2].GetString(), { "AREATRIGGER", "AURA_SELF", "FRONTAL_CONE", "REAR_CONE", "CAST_AREA" }), f[3].GetUInt8(), f[5].GetUInt8(), f[4].GetFloat() });
+            } while (r->NextRow());
+        if (QueryResult r = WorldDatabase.Query("SELECT boss_entry, phase, trigger_type, trigger_value, trigger_ref FROM bot_boss_phase"))
+            do
+            {
+                Field* f = r->Fetch();
+                auto itr = g_playbooks.find(f[0].GetUInt32());
+                if (itr != g_playbooks.end())
+                    itr->second.Phases.push_back({ f[1].GetUInt8(), PbEnum(f[2].GetString(), { "START", "HP_BELOW", "POWER_ZERO", "AURA_ON_BOSS", "BOSS_PASSIVE", "ADD_DEAD_COUNT" }), f[3].GetInt32(), f[4].GetUInt32() });
+            } while (r->NextRow());
+        if (QueryResult r = WorldDatabase.Query("SELECT boss_entry, caster_entry, spell_id, priority FROM bot_boss_interrupt"))
+            do
+            {
+                Field* f = r->Fetch();
+                auto itr = g_playbooks.find(f[0].GetUInt32());
+                if (itr != g_playbooks.end())
+                    itr->second.Interrupts.push_back({ f[1].GetUInt32(), f[2].GetUInt32(), f[3].GetUInt8() });
+            } while (r->NextRow());
+        if (QueryResult r = WorldDatabase.Query("SELECT boss_entry, aura_spell_id, priority, min_stacks FROM bot_boss_dispel"))
+            do
+            {
+                Field* f = r->Fetch();
+                auto itr = g_playbooks.find(f[0].GetUInt32());
+                if (itr != g_playbooks.end())
+                    itr->second.Dispels.push_back({ f[1].GetUInt32(), f[2].GetUInt8(), f[3].GetUInt8() });
+            } while (r->NextRow());
+        if (QueryResult r = WorldDatabase.Query("SELECT boss_entry, aura_spell_id, swap_stacks FROM bot_boss_tankswap"))
+            do
+            {
+                Field* f = r->Fetch();
+                auto itr = g_playbooks.find(f[0].GetUInt32());
+                if (itr != g_playbooks.end())
+                    itr->second.TankSwaps.push_back({ f[1].GetUInt32(), f[2].GetUInt8() });
+            } while (r->NextRow());
+        TC_LOG_INFO("scripts.bots", "BotMgr: Boss-Playbook geladen: %u Boss-Eintraege.", uint32(g_playbooks.size()));
+    }
+
+    bool PbHasMap(uint32 mapId)
+    {
+        if (!g_playbooksLoaded)
+            LoadPlaybooks();
+        for (auto const& kv : g_playbooks)
+            if (kv.second.Map == mapId)
+                return true;
+        return false;
+    }
+
+    // der Playbook-Boss der Karte, falls er lebt und kaempft (sonst nullptr)
+    Creature* PbFindBoss(Player* bot, Playbook const*& outPb)
+    {
+        outPb = nullptr;
+        if (!PbHasMap(bot->GetMapId()))
+            return nullptr;
+        for (auto const& kv : g_playbooks)
+            if (kv.second.Map == bot->GetMapId())
+                if (Creature* c = bot->FindNearestCreature(kv.first, 250.0f, true))
+                    if (c->IsInCombat())
+                    {
+                        outPb = &kv.second;
+                        return c;
+                    }
+        return nullptr;
+    }
+
+    uint8 PbPhaseOf(Creature* boss, Playbook const& pb)
+    {
+        uint8 fallback = 0;
+        for (PbPhase const& ph : pb.Phases)
+        {
+            if (ph.Trigger == 3 && boss->HasAura(uint32(ph.Value)))
+                return ph.Phase;
+            if (ph.Trigger == 2 && boss->GetPowerType() != POWER_HEALTH && boss->GetPower(boss->GetPowerType()) == 0)     // POWER_ZERO
+                return ph.Phase;
+            if (ph.Trigger == 4 && (boss->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NON_ATTACKABLE) || boss->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_IMMUNE_TO_PC))) // BOSS_PASSIVE
+                return ph.Phase;
+        }
+        for (PbPhase const& ph : pb.Phases)
+            if (ph.Trigger == 1 && boss->GetHealthPct() < float(ph.Value))
+                fallback = std::max(fallback, ph.Phase);
+        if (fallback)
+            return fallback;
+        for (PbPhase const& ph : pb.Phases)
+            if (ph.Trigger == 5 && boss->FindNearestCreature(ph.Ref, 150.0f, true))
+                return ph.Phase;
+        for (PbPhase const& ph : pb.Phases)
+            if (ph.Trigger == 0)
+                fallback = ph.Phase;
+        return fallback;
+    }
+
+    uint8 PbRoleBit(BotRole role) { return role == BotRole::Unknown ? 0 : uint8(1u << (uint8(role) - 1)); }
+
+    // Add-Verhalten fuer ein Creature in dieser Phase; nullptr = kein Eintrag
+    PbAdd const* PbAddRule(Playbook const& pb, uint32 entry, uint8 phase)
+    {
+        PbAdd const* best = nullptr;
+        for (PbAdd const& a : pb.Adds)
+            if (a.Add == entry && (a.Phase == 0 || a.Phase == phase) && (!best || a.Phase == phase))
+                best = &a;
+        return best;
+    }
+
+    // bestes Kampfziel fuer einen Schadensverteiler laut Playbook (Adds nach Prioritaet vor dem Boss, IGNORE/AVOID/TANK_ONLY nie)
+    Unit* PbSelectTarget(Player* bot, uint8 roleBit, Creature* boss, Playbook const& pb, uint8 phase)
+    {
+        uint8 bossPrio = 10;
+        if (PbAdd const* br = PbAddRule(pb, boss->GetEntry(), phase))
+            bossPrio = br->Prio;
+        Creature* best = nullptr;
+        uint8 bestPrio = 255;
+        std::set<uint32> done;
+        for (PbAdd const& a : pb.Adds)
+        {
+            if (a.Mode != 0 || a.Add == boss->GetEntry() || !(a.RoleMask & roleBit) || (a.Phase != 0 && a.Phase != phase) || !done.insert(a.Add).second)
+                continue;
+            PbAdd const* rule = PbAddRule(pb, a.Add, phase);
+            if (!rule || rule->Mode != 0 || !(rule->RoleMask & roleBit))
+                continue;
+            std::list<Creature*> found;
+            bot->GetCreatureListWithEntryInGrid(found, a.Add, 100.0f);
+            for (Creature* c : found)
+            {
+                if (!c->IsAlive() || !bot->IsValidAttackTarget(c))
+                    continue;
+                if (!best || rule->Prio < bestPrio || (rule->Prio == bestPrio && c->GetHealth() < best->GetHealth()))
+                {
+                    best = c;
+                    bestPrio = rule->Prio;
+                }
+            }
+        }
+        if (best && bestPrio < bossPrio)
+            return best;
+        return bot->IsValidAttackTarget(boss) ? boss : nullptr;
+    }
+
+    // Zielposition laut Playbook-Zeile (nur Anker BOSS); Links/Rechts und Streuung aus der Bot-GUID
+    bool PbSpot(Player* bot, Creature* boss, PbPos const& pp, float& x, float& y)
+    {
+        if (pp.Anchor != 0 || pp.Dist <= 0.0f)
+            return false;
+        uint64 const g = bot->GetGUID().GetCounter();
+        uint32 const h = uint32(g * 2654435761u);
+        float const side = (g & 1) ? 1.0f : -1.0f;
+        float const jitterD = (float(h & 0xFF) / 255.0f - 0.5f) * 2.0f * pp.Spread;
+        float const jitterA = (float((h >> 8) & 0xFF) / 255.0f - 0.5f) * 0.5f;
+        float const ang = boss->GetOrientation() + side * (float(pp.Angle) * float(M_PI) / 180.0f) + jitterA;
+        float const d = std::max(2.0f, pp.Dist + jitterD) + (pp.Role == 3 ? boss->GetCombatReach() : 0.0f);
+        x = boss->GetPositionX() + std::cos(ang) * d;
+        y = boss->GetPositionY() + std::sin(ang) * d;
+        return true;
+    }
+}
+
 Unit* BotMgr::SelectBotCombatTarget(Player* bot) const
 {
+    // Playbook-Boss auf dieser Karte: Schadensverteiler folgen den Playbook-Regeln (Add-Prioritaet, IGNORE/AVOID/TANK_ONLY)
+    bool playbookMap = false;
+    if (Map* pbMap = bot->GetMap(); pbMap && pbMap->IsRaid() && PbHasMap(bot->GetMapId()))
+    {
+        playbookMap = true;
+        BotRole const role = GetBotRole(GetBotAccountIdByGuid(bot->GetGUID()));
+        if (bot->IsInCombat() && (role == BotRole::MeleeDps || role == BotRole::RangedDps))
+        {
+            Playbook const* pb = nullptr;
+            if (Creature* boss = PbFindBoss(bot, pb))
+            {
+                uint8 const phase = PbPhaseOf(boss, *pb);
+                if (Unit* v = bot->GetVictim())
+                    if (Creature* vc = v->ToCreature())
+                        if (PbAdd const* vr = PbAddRule(*pb, vc->GetEntry(), phase))
+                            if (vr->Mode != 0)
+                                bot->AttackStop();
+                if (Unit* t = PbSelectTarget(bot, PbRoleBit(role), boss, *pb, phase))
+                {
+                    if (bot->GetVictim() != t)
+                    {
+                        bot->Attack(t, true);
+                        if (role == BotRole::MeleeDps && bot->GetDistance(t) > 7.0f)
+                            bot->GetMotionMaster()->MoveChase(t);
+                    }
+                    return t;
+                }
+            }
+        }
+    }
+
+    // Raid ohne Playbook: Schadensverteiler toeten kaempfende Adds (Nicht-Bosse) zuerst, am schwaechsten angeschlagenen zuerst; erst ohne Adds geht es auf den Boss.
+    if (Map* map = bot->GetMap(); !playbookMap && map && map->IsRaid() && bot->IsInCombat())
+        if (ChrSpecializationEntry const* spec = sChrSpecializationStore.LookupEntry(bot->GetUInt32Value(PLAYER_FIELD_CURRENT_SPEC_ID)))
+            if (spec->Role == 2)
+                if (Group* group = bot->GetGroup())
+                {
+                    Creature* bestAdd = nullptr;
+                    for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+                    {
+                        Player* member = itr->GetSource();
+                        if (!member || !member->IsInWorld() || member->GetMapId() != bot->GetMapId())
+                            continue;
+                        for (Unit* attacker : member->getAttackers())
+                        {
+                            Creature* c = attacker ? attacker->ToCreature() : nullptr;
+                            if (!c || !c->IsAlive() || c->IsDungeonBoss() || c->GetMaxHealth() > 5000000 || c->IsPet() || c->IsTotem()
+                                || bot->GetDistance(c) > 40.0f || !bot->IsValidAttackTarget(c))
+                                continue;
+                            if (!bestAdd || c->GetHealth() < bestAdd->GetHealth())
+                                bestAdd = c;
+                        }
+                    }
+                    if (bestAdd)
+                    {
+                        if (bot->GetVictim() != bestAdd)
+                        {
+                            bot->Attack(bestAdd, true);
+                            if (bot->GetDistance(bestAdd) > 7.0f && spec->ClassID != CLASS_MAGE && spec->ClassID != CLASS_WARLOCK && spec->ClassID != CLASS_PRIEST)
+                                bot->GetMotionMaster()->MoveChase(bestAdd);
+                        }
+                        return bestAdd;
+                    }
+                }
+
     if (Unit* victim = bot->GetVictim())
         if (victim->IsAlive())
             return victim;
@@ -3345,6 +3970,40 @@ Unit* BotMgr::SelectBotCombatTarget(Player* bot) const
         }
     }
 
+    // Verteidigung: im Kampf ohne eigenes Ziel (z. B. von einem Gegner angegriffen, den noch niemand der Gruppe als Opfer hat) den
+    // naechsten Angreifer des Bots oder eines Gruppenmitglieds annehmen.
+    if (bot->IsInCombat())
+    {
+        Unit* best = nullptr;
+        float bestDist = 45.0f;
+        auto consider = [&](Unit* attacker)
+        {
+            if (!attacker || !attacker->IsAlive() || !bot->IsValidAttackTarget(attacker))
+                return;
+            float const dist = bot->GetDistance(attacker);
+            if (dist < bestDist)
+            {
+                best = attacker;
+                bestDist = dist;
+            }
+        };
+        for (Unit* attacker : bot->getAttackers())
+            consider(attacker);
+        if (!best)
+            if (Group* group = bot->GetGroup())
+                for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+                    if (Player* member = itr->GetSource())
+                        if (member != bot && member->IsInWorld() && member->GetMapId() == bot->GetMapId())
+                            for (Unit* attacker : member->getAttackers())
+                                consider(attacker);
+        if (best)
+        {
+            bot->Attack(best, true);
+            bot->GetMotionMaster()->MoveChase(best);
+            return best;
+        }
+    }
+
     return nullptr;
 }
 
@@ -3352,14 +4011,22 @@ Unit* BotMgr::SelectBotHealTarget(Player* bot) const
 {
     Unit* lowestMember = nullptr;
     float lowestPct = 100.0f;
+    float lowestKey = 100.0f;
 
     auto consider = [&](Unit* candidate)
     {
         if (!candidate || !candidate->IsAlive() || candidate->GetMapId() != bot->GetMapId())
             return;
         float pct = candidate->GetHealthPct();
-        if (pct < lowestPct)
+        // Plan-Schritt 6: Tanks werden bevorzugt (15 Prozentpunkte "Vorsprung" beim Vergleich)
+        float key = pct;
+        if (Player const* cp = candidate->ToPlayer())
+            if (ChrSpecializationEntry const* cs = sChrSpecializationStore.LookupEntry(cp->GetUInt32Value(PLAYER_FIELD_CURRENT_SPEC_ID)))
+                if (cs->Role == 0)
+                    key -= 15.0f;
+        if (key < lowestKey)
         {
+            lowestKey = key;
             lowestPct = pct;
             lowestMember = candidate;
         }
@@ -3393,6 +4060,27 @@ BotRole BotMgr::GetBotRole(uint32 accountId) const
     return BotRole::Unknown;
 }
 
+namespace
+{
+    // OI-023 Diagnose: warum wirkt ein Bot im Raid nicht? Je Bot hoechstens alle 10 s eine Zeile (nur Raid-Karten).
+    void BotCombatDbg(Player* p, uint32 accountId, char const* reason, Unit* target)
+    {
+        static std::unordered_map<uint32, uint32> lastLog;
+        if (!sBotMgr->IsCombatDebug() || !p->GetMap() || !p->GetMap()->IsRaid())
+            return;
+        uint32 const now = getMSTime();
+        uint32& last = lastLog[accountId];
+        if (now - last < 10000)
+            return;
+        last = now;
+        TC_LOG_INFO("scripts.bots", "BotMgr::CombatDbg: %s spec %u: %s; Ziel '%s' hp %.2f%% d%.0f LOS %u, Victim '%s', imKampf %u.",
+            p->GetName().c_str(), uint32(p->GetPrimarySpecialization()), reason, target ? target->GetName().c_str() : "-",
+            target ? target->GetHealthPct() : 0.0f,
+            target ? p->GetDistance(target) : 0.0f, target ? uint32(p->IsWithinLOSInMap(target)) : 0u,
+            p->GetVictim() ? p->GetVictim()->GetName().c_str() : "-", uint32(p->IsInCombat()));
+    }
+}
+
 void BotMgr::ProcessBotCombatAI(uint32 accountId, uint32 diff)
 {
     auto itr = _botSessions.find(accountId);
@@ -3413,9 +4101,60 @@ void BotMgr::ProcessBotCombatAI(uint32 accountId, uint32 diff)
     if (player->IsNonMeleeSpellCast(false))
         return;
 
+    // OI-023: Zauber, die ein Spezwechsel/Ausbau als "disabled" markiert hat (character_spell.disabled=1), zaehlen fuer
+    // HasSpell() als unbekannt - Bots wirkten dann nie. Einmal pro Bot-Sitzung wieder freischalten (LearnSpell hebt disabled auf).
+    {
+        static std::unordered_set<uint64> spellsReenabled;
+        if (spellsReenabled.insert(player->GetGUID().GetCounter()).second)
+        {
+            // Direkt das Flag zuruecksetzen (kein LearnSpell: das sendet Pakete und lernt rekursiv Raenge - dabei ist der Server abgestuerzt).
+            // Nur Zauber, die die Rotation dieser Skillung auch nutzt (alle zu aktivieren schaltete Passiv-Auren fremder Specs frei und
+            // loeste eine Endlosrekursion UpdateAttackPowerAndDamage <-> UpdateSpellDamageAndHealingBonus aus).
+            uint32 reenabled = 0;
+            std::set<std::wstring> wanted;
+            if (BotSpecRotation const* rot = GetOrResolveSpecRotation(player->GetPrimarySpecialization()))
+            {
+                auto addName = [&wanted](char const* n)
+                {
+                    if (!n || !*n)
+                        return;
+                    std::wstring w;
+                    Utf8toWStr(std::string(n), w);
+                    wstrToLower(w);
+                    wanted.insert(w);
+                };
+                for (BotRotationStep const& st : rot->Priority)
+                    addName(st.SpellName);
+                addName(rot->InterruptSpellName);
+                addName(rot->DispelSpellName);
+            }
+            for (auto& kv : player->GetSpellMap())
+                if (kv.second->disabled && kv.second->state != PLAYERSPELL_REMOVED)
+                {
+                    SpellInfo const* si = sSpellMgr->GetSpellInfo(kv.first);
+                    if (!si || !si->SpellName || !si->SpellName->Str[LOCALE_enUS])
+                        continue;
+                    std::wstring wn;
+                    Utf8toWStr(si->SpellName->Str[LOCALE_enUS], wn);
+                    wstrToLower(wn);
+                    if (!wanted.count(wn))
+                        continue;
+                    kv.second->disabled = false;
+                    if (kv.second->state == PLAYERSPELL_UNCHANGED)
+                        kv.second->state = PLAYERSPELL_CHANGED;
+                    ++reenabled;
+                }
+            if (reenabled)
+                TC_LOG_INFO("scripts.bots", "BotMgr::ProcessBotCombatAI: %s: %u deaktivierte Zauber wieder freigeschaltet.", player->GetName().c_str(), reenabled);
+        }
+    }
+
     BotSpecRotation const* rotation = GetOrResolveSpecRotation(player->GetPrimarySpecialization());
     if (!rotation)
+    {
+        BotCombatDbg(player, accountId, "keine Rotation fuer Skillung", nullptr);
         return; // Skillung noch nicht verdrahtet - siehe Kopfkommentar bei g_BotSpecRotations
+    }
 
     // Runde 3: BEIDE moeglichen Ziele im Voraus ermitteln (billig - jeweils nur eine Gruppen-Iteration/
     // ein GetVictim()-Zugriff), damit einzelne Schritte per TargetOverride unabhaengig von der
@@ -3423,20 +4162,153 @@ void BotMgr::ProcessBotCombatAI(uint32 accountId, uint32 diff)
     // Kommentar in BotMgr.h, noetig fuer Discipline Priest's Atonement-Mechanik).
     Unit* combatTarget = SelectBotCombatTarget(player);
     Unit* healTarget = SelectBotHealTarget(player);
-    Unit* roleDefaultTarget = rotation->Role == BotRole::Healer ? healTarget : combatTarget;
-
-    if (!combatTarget && !healTarget)
-        return; // weder ein Kampfziel noch ein Heilbedarf - fuer diese Skillung aktuell nichts zu tun
-
-    // Generische Boss-Mechanik-Reaktionen (Ausweichen/Interrupt/Dispel, siehe BotMgr.h-Kommentar bei
-    // ProcessBotMechanicReactions()) haben Vorrang vor der normalen Rotation.
-    if (ProcessBotMechanicReactions(player, rotation, combatTarget, healTarget))
+    // Plan-Schritt 6: ausserhalb des Kampfes tote Gruppenmitglieder wiederbeleben (Heiler-Rollen)
+    if (!combatTarget && !player->IsInCombat() && rotation->Role == BotRole::Healer && BotTryResurrectMember(player))
         return;
 
+    // Boss-Playbook: Tankwechsel (bot_boss_tankswap) - traegt der aktive Tank genug Stapel des Debuffs, spottet der andere Tank den Boss
+    if (rotation->Role == BotRole::Tank && player->GetMap()->IsRaid())
+    {
+        Playbook const* pb = nullptr;
+        if (Creature* pbBoss = PbFindBoss(player, pb))
+            if (Unit* active = pbBoss->GetVictim())
+                if (active != player && active->GetTypeId() == TYPEID_PLAYER)
+                    for (PbTankSwap const& ts : pb->TankSwaps)
+                        if (Aura* a = active->GetAura(ts.Aura))
+                            if (a->GetStackAmount() >= ts.Stacks && !player->HasAura(ts.Aura) && BotTryTaunt(player, pbBoss))
+                                return;
+    }
+
+    // Plan-Schritt 3: Tank-Aggro. Der Tank waehlt ein Ziel, das gerade ein anderes Gruppenmitglied angreift, und spottet es heran.
+    if (rotation->Role == BotRole::Tank)
+    {
+        if (Unit* tankTarget = SelectBotTankTarget(player))
+        {
+            combatTarget = tankTarget;
+            if (player->GetVictim() != tankTarget)
+            {
+                player->Attack(tankTarget, true);
+                player->GetMotionMaster()->MoveChase(tankTarget);
+            }
+            if (BotTryTaunt(player, tankTarget))
+                return;
+        }
+    }
+    else if (combatTarget && rotation->Role != BotRole::Healer)
+    {
+        // Schadensverteiler warten, bis ein Tank der Gruppe das Ziel haelt, und bremsen bei zu hohem Threat gegenueber dem Haupt-Ziel.
+        Player* tank = nullptr;
+        if (Group* g = player->GetGroup())
+            for (GroupReference* gr = g->GetFirstMember(); gr && !tank; gr = gr->next())
+            {
+                Player* m = gr->GetSource();
+                if (m && m != player && m->IsAlive() && m->GetMapId() == player->GetMapId() && IsBotPlayerGuid(m->GetGUID()) && GetBotRole(GetBotAccountIdByGuid(m->GetGUID())) == BotRole::Tank
+                    && m->GetDistance(player) < 60.0f)
+                    tank = m;
+            }
+        if (tank && combatTarget->ToCreature())
+        {
+            if (!combatTarget->GetVictim())
+            {
+                BotCombatDbg(player, accountId, "wartet: Tank hat Ziel nicht gezogen", combatTarget);
+                return; // der Tank hat das Ziel noch nicht gezogen
+            }
+            ThreatManager& tm = combatTarget->getThreatManager();
+            HostileReference* top = tm.getCurrentVictim();
+            if (top && top->getTarget() != player && tm.getThreat(player) > top->getThreat() * 1.3f)
+            {
+                BotCombatDbg(player, accountId, "Threat-Bremse", combatTarget);
+                return; // fast Aggro-Uebernahme: diesen Tick nichts wirken
+            }
+        }
+    }
+
+    if (!combatTarget && !healTarget)
+    {
+        BotCombatDbg(player, accountId, "kein Kampfziel/Heilziel", nullptr);
+        return; // weder ein Kampfziel noch ein Heilbedarf - fuer diese Skillung aktuell nichts zu tun
+    }
+
+    // Generische Boss-Mechanik-Reaktionen (Ausweichen/Interrupt/Dispel, siehe BotMgr.h-Kommentar bei ProcessBotMechanicReactions())
+    // haben Vorrang vor Positionierung und Rotation (sonst schickt die Aufstellung den Bot sofort zurueck in den Bodeneffekt).
+    if (ProcessBotMechanicReactions(player, rotation, combatTarget, healTarget))
+    {
+        BotCombatDbg(player, accountId, "Mechanik-Reaktion hat Vorrang", combatTarget);
+        return;
+    }
+
+    // Boss-Playbook: Aufstellung laut bot_boss_position (ersetzt die Standard-Positionierung dieser Rolle, solange der Boss kaempft)
+    bool pbPositioned = false;
+    if (rotation->Role != BotRole::Tank && player->GetMap()->IsRaid())
+    {
+        Playbook const* pb = nullptr;
+        if (Creature* pbBoss = PbFindBoss(player, pb))
+        {
+            uint8 const phase = PbPhaseOf(pbBoss, *pb);
+            for (PbPos const& pp : pb->Pos)
+                if (pp.Role == uint8(rotation->Role) && (pp.Phase == 0 || pp.Phase == phase))
+                {
+                    float sx = 0.0f, sy = 0.0f;
+                    if (PbSpot(player, pbBoss, pp, sx, sy))
+                    {
+                        pbPositioned = true;
+                        if (player->GetExactDist2d(sx, sy) > 3.0f + pp.Spread && player->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+                            player->GetMotionMaster()->MovePoint(0, sx, sy, pbBoss->GetPositionZ(), true);
+                    }
+                    break;
+                }
+        }
+    }
+
+    // Plan-Schritt 4: Positionierung nach Rolle (Nahkampf an den Gegner, Fernkampf/Heiler auf Zauberdistanz mit Sichtlinie)
+    if (!pbPositioned)
+    {
+        Unit* posTarget = rotation->Role == BotRole::Healer ? healTarget : combatTarget;
+        if (posTarget && posTarget != player)
+        {
+            float const dist = player->GetDistance(posTarget);
+            if (rotation->Role == BotRole::MeleeDps || rotation->Role == BotRole::Tank)
+            {
+                // Schadensverteiler-Nahkaempfer stellen sich bei grossen Bossen seitlich (90 Grad zur Blickrichtung): Atem trifft vorne,
+                // Schwanzhieb (Tail Lash) hinten. Links/rechts nach Bot-GUID gestreut.
+                Creature* bossTarget = combatTarget ? combatTarget->ToCreature() : nullptr;
+                bool const sideSpot = rotation->Role == BotRole::MeleeDps && bossTarget && (bossTarget->IsDungeonBoss() || bossTarget->GetMaxHealth() > 5000000);
+                if (sideSpot)
+                {
+                    float const side = (player->GetGUID().GetCounter() & 1) ? float(M_PI / 2) : -float(M_PI / 2);
+                    float const reach = std::max(2.5f, bossTarget->GetCombatReach() + 1.0f);
+                    float const sx = bossTarget->GetPositionX() + std::cos(bossTarget->GetOrientation() + side) * reach;
+                    float const sy = bossTarget->GetPositionY() + std::sin(bossTarget->GetOrientation() + side) * reach;
+                    if (player->GetExactDist2d(sx, sy) > 3.0f && player->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+                        player->GetMotionMaster()->MovePoint(0, sx, sy, bossTarget->GetPositionZ(), true);
+                }
+                else if (combatTarget && dist > 7.0f && player->GetMotionMaster()->GetCurrentMovementGeneratorType() != CHASE_MOTION_TYPE)
+                    player->GetMotionMaster()->MoveChase(combatTarget);
+                // Nahkaempfer muessen das Ziel auch ANGREIFEN (Auto-Attack), sonst bleibt "Victim" leer und nur Zauber wirken
+                if (combatTarget && dist <= 9.0f && player->GetVictim() != combatTarget && player->IsValidAttackTarget(combatTarget))
+                    player->Attack(combatTarget, true);
+            }
+            else if ((dist > 28.0f || !player->IsWithinLOSInMap(posTarget)) && player->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+            {
+                float const ang = posTarget->GetAngle(player);
+                float const want = rotation->Role == BotRole::Healer ? 18.0f : 22.0f;
+                player->GetMotionMaster()->MovePoint(0, posTarget->GetPositionX() + std::cos(ang) * want, posTarget->GetPositionY() + std::sin(ang) * want, posTarget->GetPositionZ(), true);
+            }
+        }
+    }
+
+
+    Unit* roleDefaultTarget = rotation->Role == BotRole::Healer ? healTarget : combatTarget;
+
+    std::string dbgUnknownName;
+    uint32 dbgUnresolved = 0, dbgUnknown = 0, dbgCooldown = 0, dbgCond = 0, dbgRange = 0, dbgLos = 0, dbgCastFail = 0;
     for (BotRotationStep const& step : rotation->Priority)
     {
         if (!step.ResolvedSpellId)
+        {
+            ++dbgUnresolved;
             continue; // Namensaufloesung ist fehlgeschlagen (siehe ResolveSpellIdByName()-Fehlerlog)
+        }
 
         Unit* target = roleDefaultTarget;
         if (step.TargetOverride == BotRotationTargetOverride::ForceEnemy)
@@ -3447,28 +4319,54 @@ void BotMgr::ProcessBotCombatAI(uint32 accountId, uint32 diff)
         if (!target)
             continue;
 
-        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(step.ResolvedSpellId);
-        if (!spellInfo || !player->HasSpell(step.ResolvedSpellId))
+        // OI-017: die vom Bot TATSAECHLICH gekannte Id desselben Namens verwenden (siehe FindKnownSpellIdByName()).
+        uint32 const castSpellId = FindKnownSpellIdByName(player, step.SpellName, rotation->SpellFamily, step.ResolvedSpellId);
+        SpellInfo const* spellInfo = castSpellId ? sSpellMgr->GetSpellInfo(castSpellId) : nullptr;
+        if (!spellInfo)
+        {
+            if (!dbgUnknown)
+                dbgUnknownName = std::string(step.SpellName) + " resolved " + std::to_string(step.ResolvedSpellId) + " has " + std::to_string(uint32(player->HasSpell(step.ResolvedSpellId))) + " fam " + std::to_string(uint32(rotation->SpellFamily)) + " cast " + std::to_string(castSpellId);
+            ++dbgUnknown;
             continue; // (noch) nicht erlernt, z.B. talentabhaengige Faehigkeit ohne diese Talentwahl
+        }
 
         if (!player->GetSpellHistory()->IsReady(spellInfo))
+        {
+            ++dbgCooldown;
             continue;
+        }
 
         if (!EvaluateBotRotationCondition(player, target, step))
+        {
+            ++dbgCond;
             continue;
+        }
 
         float maxRange = spellInfo->GetMaxRange(false, player);
         if (maxRange > 0.0f && player->GetDistance(target) > maxRange)
+        {
+            ++dbgRange;
             continue;
+        }
         if (!player->IsWithinLOSInMap(target))
+        {
+            ++dbgLos;
             continue;
+        }
 
-        if (player->CastSpell(target, step.ResolvedSpellId, TRIGGERED_NONE))
+        if (player->CastSpell(target, castSpellId, TRIGGERED_NONE))
         {
             TC_LOG_DEBUG("scripts.bots", "BotMgr::ProcessBotCombatAI: Account %u castet '%s' (Id %u) auf %s.",
-                accountId, step.SpellName, step.ResolvedSpellId, target->GetGUID().ToString().c_str());
+                accountId, step.SpellName, castSpellId, target->GetGUID().ToString().c_str());
             return; // maximal ein Zauber pro Tick (gemeinsame GCD-Ressource, siehe Kopfkommentar)
         }
+        ++dbgCastFail;
+    }
+    {
+        char why[260];
+        snprintf(why, sizeof(why), "kein Rotationsschritt wirkbar (%u Schritte: unaufgeloest %u, unbekannt %u ['%s'], Abklingzeit %u, Bedingung %u, Reichweite %u, Sicht %u, CastFehler %u)",
+            uint32(rotation->Priority.size()), dbgUnresolved, dbgUnknown, dbgUnknownName.c_str(), dbgCooldown, dbgCond, dbgRange, dbgLos, dbgCastFail);
+        BotCombatDbg(player, accountId, why, roleDefaultTarget);
     }
 }
 
@@ -3542,9 +4440,294 @@ DynamicObject* BotMgr::FindHarmfulGroundEffectUnderBot(Player* bot, float search
     return nullptr;
 }
 
+namespace
+{
+    // Plan-Schritt 5: schaedliche AreaTrigger (typische Legion-Bossboeden) - feindlicher Wirker, nicht-positiver Zauber, Radius <= 15
+    class BotHarmfulAreaTriggerCheck
+    {
+    public:
+        BotHarmfulAreaTriggerCheck(WorldObject const* searcher, float range) : _searcher(searcher), _range(range) { }
+
+        template<typename T>
+        bool operator()(T*) const { return false; }
+
+        bool operator()(AreaTrigger* at) const
+        {
+            return !at->IsRemoved() && _searcher->IsWithinDistInMap(at, _range);
+        }
+
+    private:
+        WorldObject const* _searcher;
+        float _range;
+    };
+
+    AreaTrigger* FindHarmfulAreaTriggerUnderBot(Player* bot, float searchRadius, float& outRadius)
+    {
+        std::list<WorldObject*> candidates;
+        CellCoord cellCoord(Trinity::ComputeCellCoord(bot->GetPositionX(), bot->GetPositionY()));
+        Cell cell(cellCoord);
+        cell.SetNoCreate();
+
+        BotHarmfulAreaTriggerCheck check(bot, searchRadius);
+        Trinity::WorldObjectListSearcher<BotHarmfulAreaTriggerCheck> searcher(bot, candidates, check, GRID_MAP_TYPE_MASK_AREATRIGGER);
+        TypeContainerVisitor<Trinity::WorldObjectListSearcher<BotHarmfulAreaTriggerCheck>, WorldTypeMapContainer> worldVisitor(searcher);
+        TypeContainerVisitor<Trinity::WorldObjectListSearcher<BotHarmfulAreaTriggerCheck>, GridTypeMapContainer> gridVisitor(searcher);
+        cell.Visit(cellCoord, worldVisitor, *bot->GetMap(), *bot, searchRadius);
+        cell.Visit(cellCoord, gridVisitor, *bot->GetMap(), *bot, searchRadius);
+
+        for (WorldObject* candidate : candidates)
+        {
+            AreaTrigger* at = candidate->ToAreaTrigger();
+            if (!at)
+                continue;
+            Unit* caster = at->GetCaster();
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(at->GetSpellId());
+            // Der Ausloese-Zauber eines Boss-Bodeneffekts (z.B. Infested Ground 203044) hat oft keine Schadenseffekte und gilt als "positiv" -
+            // daher zaehlt hier jeder AreaTrigger einer feindlichen Kreatur (Schaden macht das AreaTrigger-Skript).
+            if (!caster || !caster->IsHostileTo(bot) || !info || !caster->ToCreature())
+                continue;
+            float radius = at->GetTemplate() ? at->GetTemplate()->MaxSearchRadius : 0.0f;
+            if (radius <= 0.0f)
+                radius = 4.0f;
+            radius += 1.5f; // Sicherheitsrand
+            radius = std::min(radius, 15.0f);
+            if (bot->GetExactDist2d(at) <= radius)
+            {
+                outRadius = radius;
+                return at;
+            }
+        }
+        return nullptr;
+    }
+}
+
+namespace
+{
+    struct HarmfulZone { float X, Y, Radius; };
+
+    // alle schaedlichen AreaTrigger feindlicher Kreaturen im Umkreis (Mittelpunkt + Wirkradius inkl. Sicherheitsrand)
+    void CollectHarmfulAreaTriggers(Player* bot, float searchRadius, std::vector<HarmfulZone>& out)
+    {
+        std::list<WorldObject*> candidates;
+        CellCoord cellCoord(Trinity::ComputeCellCoord(bot->GetPositionX(), bot->GetPositionY()));
+        Cell cell(cellCoord);
+        cell.SetNoCreate();
+        BotHarmfulAreaTriggerCheck check(bot, searchRadius);
+        Trinity::WorldObjectListSearcher<BotHarmfulAreaTriggerCheck> searcher(bot, candidates, check, GRID_MAP_TYPE_MASK_AREATRIGGER);
+        TypeContainerVisitor<Trinity::WorldObjectListSearcher<BotHarmfulAreaTriggerCheck>, WorldTypeMapContainer> worldVisitor(searcher);
+        TypeContainerVisitor<Trinity::WorldObjectListSearcher<BotHarmfulAreaTriggerCheck>, GridTypeMapContainer> gridVisitor(searcher);
+        cell.Visit(cellCoord, worldVisitor, *bot->GetMap(), *bot, searchRadius);
+        cell.Visit(cellCoord, gridVisitor, *bot->GetMap(), *bot, searchRadius);
+        for (WorldObject* candidate : candidates)
+        {
+            AreaTrigger* at = candidate->ToAreaTrigger();
+            if (!at)
+                continue;
+            Unit* caster = at->GetCaster();
+            if (!caster || !caster->ToCreature() || !caster->IsHostileTo(bot) || !sSpellMgr->GetSpellInfo(at->GetSpellId()))
+                continue;
+            float radius = at->GetTemplate() ? at->GetTemplate()->MaxSearchRadius : 0.0f;
+            if (radius <= 0.0f)
+                radius = 4.0f;
+            out.push_back({ at->GetPositionX(), at->GetPositionY(), std::min(radius, 15.0f) + 1.5f });
+        }
+    }
+}
+
 bool BotMgr::ProcessBotMechanicReactions(Player* bot, BotSpecRotation const* rotation, Unit* combatTarget,
     Unit* healTarget)
 {
+    // Boss-Playbook (bot_boss_avoid): schaedliche Aura auf mir (vom Raid weglaufen) und Frontal-Kegel (seitlich ausweichen)
+    if (bot->GetMap()->IsRaid())
+    {
+        Playbook const* pb = nullptr;
+        if (Creature* pbBoss = PbFindBoss(bot, pb))
+        {
+            uint8 const phase = PbPhaseOf(pbBoss, *pb);
+            uint8 const roleBit = PbRoleBit(rotation->Role);
+            for (PbAvoid const& av : pb->Avoid)
+            {
+                if ((av.Phase != 0 && av.Phase != phase) || !(av.RoleMask & roleBit))
+                    continue;
+                if (av.Kind == 1 && bot->HasAura(av.Spell)) // AURA_SELF: Abstand zu den anderen Gruppenmitgliedern herstellen
+                {
+                    float want = av.Radius > 0.0f ? av.Radius : 10.0f;
+                    Unit* nearest = nullptr;
+                    float nearestDist = 9999.0f;
+                    if (Group* g = bot->GetGroup())
+                        for (GroupReference* gr = g->GetFirstMember(); gr; gr = gr->next())
+                            if (Player* m = gr->GetSource())
+                                if (m != bot && m->IsAlive() && m->GetMapId() == bot->GetMapId())
+                                {
+                                    float const d = bot->GetExactDist2d(m);
+                                    if (d < nearestDist)
+                                    {
+                                        nearestDist = d;
+                                        nearest = m;
+                                    }
+                                }
+                    if (nearest && nearestDist < want)
+                    {
+                        if (bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+                        {
+                            float const ang = nearest->GetAngle(bot);
+                            float const step = want - nearestDist + 3.0f;
+                            bot->GetMotionMaster()->MovePoint(0, bot->GetPositionX() + std::cos(ang) * step, bot->GetPositionY() + std::sin(ang) * step, bot->GetPositionZ(), true);
+                        }
+                        return true;
+                    }
+                }
+                else if (av.Kind == 2 && pbBoss->GetVictim() != bot) // FRONTAL_CONE: waehrend der Boss den Zauber wirkt nicht vor ihm stehen
+                {
+                    Spell* cur = pbBoss->GetCurrentSpell(CURRENT_CHANNELED_SPELL);
+                    if (!cur)
+                        cur = pbBoss->GetCurrentSpell(CURRENT_GENERIC_SPELL);
+                    if (cur && cur->GetSpellInfo()->Id == av.Spell && pbBoss->HasInArc(1.75f, bot) && bot->GetDistance(pbBoss) < 40.0f)
+                    {
+                        if (bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+                        {
+                            float const sideAng = pbBoss->GetOrientation() + ((bot->GetGUID().GetCounter() & 1) ? float(M_PI / 2) : -float(M_PI / 2));
+                            bot->GetMotionMaster()->MovePoint(0, pbBoss->GetPositionX() + std::cos(sideAng) * 8.0f, pbBoss->GetPositionY() + std::sin(sideAng) * 8.0f, pbBoss->GetPositionZ(), true);
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Boss-Playbook: gezielter Interrupt (bot_boss_interrupt) und Dispel (bot_boss_dispel); je Wirker/Ziel nur ein Bot pro 1,5 s
+    if (bot->GetMap()->IsRaid())
+    {
+        Playbook const* pb = nullptr;
+        if (Creature* pbBoss = PbFindBoss(bot, pb))
+        {
+            static std::unordered_map<uint64, uint32> claims; // GUID-Zaehler des Wirkers/Ziels -> Zeit des letzten Zugriffs
+            uint32 const now = getMSTime();
+            uint32 const intSpell = (rotation->InterruptSpellName && !pb->Interrupts.empty())
+                ? FindKnownSpellIdByName(bot, rotation->InterruptSpellName, rotation->SpellFamily, rotation->ResolvedInterruptSpellId) : 0;
+            if (intSpell)
+                if (SpellInfo const* ii = sSpellMgr->GetSpellInfo(intSpell))
+                    if (bot->GetSpellHistory()->IsReady(ii))
+                    {
+                        std::list<Creature*> casters;
+                        casters.push_back(pbBoss);
+                        if (Group* g = bot->GetGroup())
+                            for (GroupReference* gr = g->GetFirstMember(); gr; gr = gr->next())
+                                if (Player* m = gr->GetSource())
+                                    for (Unit* at : m->getAttackers())
+                                        if (Creature* ac = at ? at->ToCreature() : nullptr)
+                                            casters.push_back(ac);
+                        for (Creature* c : casters)
+                        {
+                            if (!c->IsAlive() || bot->GetDistance(c) > ii->GetMaxRange(false, bot) || !bot->IsWithinLOSInMap(c))
+                                continue;
+                            Spell* cur = c->GetCurrentSpell(CURRENT_GENERIC_SPELL);
+                            if (!cur)
+                                cur = c->GetCurrentSpell(CURRENT_CHANNELED_SPELL);
+                            if (!cur)
+                                continue;
+                            bool wanted = false;
+                            for (PbInterrupt const& pi : pb->Interrupts)
+                                if (pi.Spell == cur->GetSpellInfo()->Id && (pi.Caster == 0 || pi.Caster == c->GetEntry()))
+                                    wanted = true;
+                            uint32& last = claims[c->GetGUID().GetCounter()];
+                            if (!wanted || now - last < 1500)
+                                continue;
+                            if (bot->CastSpell(c, intSpell, TRIGGERED_NONE))
+                            {
+                                last = now;
+                                return true;
+                            }
+                        }
+                    }
+            uint32 const dispSpell = (rotation->DispelSpellName && !pb->Dispels.empty())
+                ? FindKnownSpellIdByName(bot, rotation->DispelSpellName, rotation->SpellFamily, rotation->ResolvedDispelSpellId) : 0;
+            if (dispSpell)
+                if (SpellInfo const* di = sSpellMgr->GetSpellInfo(dispSpell))
+                    if (bot->GetSpellHistory()->IsReady(di))
+                        if (Group* g = bot->GetGroup())
+                            for (GroupReference* gr = g->GetFirstMember(); gr; gr = gr->next())
+                                if (Player* m = gr->GetSource())
+                                    if (m->IsAlive() && m->GetMapId() == bot->GetMapId() && bot->GetDistance(m) <= di->GetMaxRange(false, bot) && bot->IsWithinLOSInMap(m))
+                                        for (PbDispel const& pd : pb->Dispels)
+                                            if (Aura* a = m->GetAura(pd.Aura))
+                                                if (a->GetStackAmount() >= pd.MinStacks)
+                                                {
+                                                    uint32& last = claims[m->GetGUID().GetCounter() + 0x100000000ull];
+                                                    if (now - last < 1500)
+                                                        continue;
+                                                    if (bot->CastSpell(m, dispSpell, TRIGGERED_NONE))
+                                                    {
+                                                        last = now;
+                                                        return true;
+                                                    }
+                                                }
+        }
+    }
+
+    // Schaedliche Boden-AreaTrigger: steht der Bot in einem, laeuft er in die sicherste Richtung (groesster Abstand zu ALLEN Flaechen in 35 yd),
+    // und prueft das alle 0,5 s neu - nicht nur eine feste Richtung, die in die naechste Flaeche fuehren kann.
+    {
+        std::vector<HarmfulZone> zones;
+        CollectHarmfulAreaTriggers(bot, 35.0f, zones);
+        // Playbook: als AVOID markierte Adds (z.B. Corrupted Vermin mit Burst of Corruption) sind wie Boden-Flaechen mit 9 yd Radius zu meiden
+        if (bot->GetMap()->IsRaid())
+        {
+            Playbook const* avoidPb = nullptr;
+            if (PbFindBoss(bot, avoidPb))
+            {
+                std::set<uint32> avoidEntries;
+                for (PbAdd const& a : avoidPb->Adds)
+                    if (a.Mode == 2)
+                        avoidEntries.insert(a.Add);
+                for (uint32 entry : avoidEntries)
+                {
+                    std::list<Creature*> found;
+                    bot->GetCreatureListWithEntryInGrid(found, entry, 40.0f);
+                    for (Creature* c : found)
+                        if (c->IsAlive())
+                            zones.push_back({ c->GetPositionX(), c->GetPositionY(), 9.0f });
+                }
+            }
+        }
+        bool under = false;
+        for (HarmfulZone const& z : zones)
+            if (bot->GetExactDist2d(z.X, z.Y) <= z.Radius)
+                under = true;
+        if (under)
+        {
+            static std::unordered_map<uint64, uint32> lastDodge;
+            uint32 const now = getMSTime();
+            uint32& last = lastDodge[bot->GetGUID().GetCounter()];
+            if (now - last >= 500)
+            {
+                last = now;
+                float bestScore = -9999.0f, bestX = bot->GetPositionX(), bestY = bot->GetPositionY();
+                for (float dist : { 7.0f, 11.0f, 15.0f })
+                    for (int i = 0; i < 12; ++i)
+                    {
+                        float const ang = float(i) * float(M_PI) / 6.0f;
+                        float const px = bot->GetPositionX() + std::cos(ang) * dist;
+                        float const py = bot->GetPositionY() + std::sin(ang) * dist;
+                        float score = 9999.0f;
+                        for (HarmfulZone const& z : zones)
+                            score = std::min(score, float(std::hypot(px - z.X, py - z.Y)) - z.Radius);
+                        score -= dist * 0.15f; // kurze Wege leicht bevorzugen
+                        if (score > bestScore)
+                        {
+                            bestScore = score;
+                            bestX = px;
+                            bestY = py;
+                        }
+                    }
+                bot->GetMotionMaster()->MovePoint(0, bestX, bestY, bot->GetPositionZ(), true);
+            }
+            BotCombatDbg(bot, uint32(bot->GetGUID().GetCounter()) + 1000000u, "weicht AreaTrigger aus", combatTarget);
+            return true;
+        }
+    }
+
     // 1. Gefaehrlichen Bodeneffekt verlassen - hoechste Prioritaet, da Steh'nbleiben potentiell toedlich
     // ist, waehrend Interrupt/Dispel "nur" DPS/Heilausfall bedeuten. Suchradius bewusst klein gewaehlt
     // (der Bot steht ja bereits im/nahe am Effekt, wenn dieser ueberhaupt relevant wird).
@@ -3575,6 +4758,7 @@ bool BotMgr::ProcessBotMechanicReactions(Player* bot, BotSpecRotation const* rot
             TC_LOG_DEBUG("scripts.bots", "BotMgr::ProcessBotMechanicReactions: Bot %s weicht Bodeneffekt "
                 "(Spell %u) aus.", bot->GetGUID().ToString().c_str(), harmfulEffect->GetSpellId());
         }
+        BotCombatDbg(bot, uint32(bot->GetGUID().GetCounter()) + 1000000u, "weicht Bodeneffekt aus", combatTarget);
         return true;
     }
 
@@ -3582,24 +4766,27 @@ bool BotMgr::ProcessBotMechanicReactions(Player* bot, BotSpecRotation const* rot
     // Bot sie bereits erlernt hat/sie einsatzbereit ist. Der Core prueft beim tatsaechlichen Cast von
     // Spell::EffectInterruptCast() selbst, ob combatTarget gerade unterbrechbar castet - hier reicht
     // die billige Vorabpruefung "castet ueberhaupt gerade etwas", um unnoetige Fehlversuche zu vermeiden.
-    if (rotation->ResolvedInterruptSpellId && combatTarget)
+    uint32 const interruptSpellId = rotation->InterruptSpellName
+        ? FindKnownSpellIdByName(bot, rotation->InterruptSpellName, rotation->SpellFamily, rotation->ResolvedInterruptSpellId) : 0;
+    if (interruptSpellId && combatTarget)
     {
         bool targetIsCasting = combatTarget->GetCurrentSpell(CURRENT_GENERIC_SPELL) != nullptr
             || combatTarget->GetCurrentSpell(CURRENT_CHANNELED_SPELL) != nullptr;
 
-        if (targetIsCasting && bot->HasSpell(rotation->ResolvedInterruptSpellId))
+        if (targetIsCasting)
         {
-            if (SpellInfo const* interruptInfo = sSpellMgr->GetSpellInfo(rotation->ResolvedInterruptSpellId))
+            if (SpellInfo const* interruptInfo = sSpellMgr->GetSpellInfo(interruptSpellId))
             {
                 if (bot->GetSpellHistory()->IsReady(interruptInfo)
                     && bot->GetDistance(combatTarget) <= interruptInfo->GetMaxRange(false, bot)
                     && bot->IsWithinLOSInMap(combatTarget))
                 {
-                    if (bot->CastSpell(combatTarget, rotation->ResolvedInterruptSpellId, TRIGGERED_NONE))
+                    if (bot->CastSpell(combatTarget, interruptSpellId, TRIGGERED_NONE))
                     {
                         TC_LOG_DEBUG("scripts.bots", "BotMgr::ProcessBotMechanicReactions: Bot %s "
                             "unterbricht %s (Interrupt-Spell %u).", bot->GetGUID().ToString().c_str(),
-                            combatTarget->GetGUID().ToString().c_str(), rotation->ResolvedInterruptSpellId);
+                            combatTarget->GetGUID().ToString().c_str(), interruptSpellId);
+                        BotCombatDbg(bot, uint32(bot->GetGUID().GetCounter()) + 1000000u, "Interrupt", combatTarget);
                         return true;
                     }
                 }
@@ -3610,9 +4797,11 @@ bool BotMgr::ProcessBotMechanicReactions(Player* bot, BotSpecRotation const* rot
     // 3. Dispel - der Core waehlt die zu entfernende Aura selbst aus (Unit::GetDispellableAuraList(),
     // dieselbe Logik wie Spell::EffectDispel() sie fuer echte Spieler-Dispels nutzt), anhand der
     // DispelMask des Dispel-Spells selbst (SpellInfo::Dispel-Feld, z.B. "Dispel Magic" -> Magic).
-    if (rotation->ResolvedDispelSpellId && healTarget && bot->HasSpell(rotation->ResolvedDispelSpellId))
+    uint32 const dispelSpellId = rotation->DispelSpellName
+        ? FindKnownSpellIdByName(bot, rotation->DispelSpellName, rotation->SpellFamily, rotation->ResolvedDispelSpellId) : 0;
+    if (dispelSpellId && healTarget)
     {
-        if (SpellInfo const* dispelInfo = sSpellMgr->GetSpellInfo(rotation->ResolvedDispelSpellId))
+        if (SpellInfo const* dispelInfo = sSpellMgr->GetSpellInfo(dispelSpellId))
         {
             if (bot->GetSpellHistory()->IsReady(dispelInfo)
                 && bot->GetDistance(healTarget) <= dispelInfo->GetMaxRange(false, bot)
@@ -3622,11 +4811,11 @@ bool BotMgr::ProcessBotMechanicReactions(Player* bot, BotSpecRotation const* rot
                 healTarget->GetDispellableAuraList(bot, dispelInfo->GetDispelMask(), dispelList);
                 if (!dispelList.empty())
                 {
-                    if (bot->CastSpell(healTarget, rotation->ResolvedDispelSpellId, TRIGGERED_NONE))
+                    if (bot->CastSpell(healTarget, dispelSpellId, TRIGGERED_NONE))
                     {
                         TC_LOG_DEBUG("scripts.bots", "BotMgr::ProcessBotMechanicReactions: Bot %s "
                             "dispelt %s (Dispel-Spell %u).", bot->GetGUID().ToString().c_str(),
-                            healTarget->GetGUID().ToString().c_str(), rotation->ResolvedDispelSpellId);
+                            healTarget->GetGUID().ToString().c_str(), dispelSpellId);
                         return true;
                     }
                 }
@@ -3816,28 +5005,88 @@ namespace
     constexpr float BOT_DUNGEON_CLEAR_ARRIVAL_DISTANCE = 5.0f; // "am Boss angekommen"-Toleranz
 }
 
+namespace
+{
+    // Plan-Schritt 1 (04.10.2026): Boss-Erkennung ohne Core-Flag. Die Tabelle world.bot_raid_boss_order (map, order, entry) nennt die
+    // Bosse mit Reihenfolge; Legion-Raid-Bosse haben kein instance_encounters-Eintrag und damit kein IsDungeonBoss().
+    std::map<uint32, std::map<uint32, uint32>>& RaidBossTable() // map -> (entry -> order)
+    {
+        static std::map<uint32, std::map<uint32, uint32>> table;
+        static bool loaded = false;
+        if (!loaded)
+        {
+            loaded = true;
+            if (QueryResult result = WorldDatabase.Query("SELECT `map`, `order`, `entry` FROM `bot_raid_boss_order`"))
+            {
+                do
+                {
+                    Field* f = result->Fetch();
+                    table[f[0].GetUInt32()][f[2].GetUInt32()] = f[1].GetUInt32();
+                } while (result->NextRow());
+            }
+            TC_LOG_INFO("scripts.bots", "BotMgr: bot_raid_boss_order geladen: %u Karten.", uint32(table.size()));
+        }
+        return table;
+    }
+
+    bool IsRaidTableBoss(uint32 mapId, uint32 entry)
+    {
+        auto m = RaidBossTable().find(mapId);
+        return m != RaidBossTable().end() && m->second.count(entry);
+    }
+}
+
 Creature* BotMgr::FindNearestLivingDungeonBoss(Player* bot) const
 {
-    Creature* best = nullptr;
-    float bestDist = 0.0f;
+    Map* map = bot->GetMap();
+    auto const& tableForMap = RaidBossTable();
+    auto tm = tableForMap.find(map->GetId());
 
-    for (auto const& pair : bot->GetMap()->GetCreatureBySpawnIdStore())
+    // Plan-Schritt 10: lebende Boss-GUIDs je Instanz hoechstens einmal pro Sekunde neu ermitteln (statt Voll-Scan je Bot und Tick)
+    struct BossCache { uint32 StampMs = 0; std::vector<ObjectGuid> Guids; };
+    static std::unordered_map<Map const*, BossCache> cache;
+    BossCache& bc = cache[map];
+    uint32 const nowMs = getMSTime();
+    if (bc.StampMs == 0 || getMSTimeDiff(bc.StampMs, nowMs) > 1000)
     {
-        Creature* creature = pair.second;
-        if (!creature || !creature->IsInWorld() || !creature->IsAlive() || !creature->IsDungeonBoss())
-            continue;
+        bc.StampMs = nowMs ? nowMs : 1;
+        bc.Guids.clear();
+        for (auto const& pair : map->GetCreatureBySpawnIdStore())
+        {
+            Creature* creature = pair.second;
+            if (!creature || !creature->IsInWorld() || !creature->IsAlive())
+                continue;
+            if (creature->IsDungeonBoss() || (tm != tableForMap.end() && tm->second.count(creature->GetEntry())))
+                bc.Guids.push_back(creature->GetGUID());
+        }
+    }
 
+    Creature* best = nullptr;
+    uint32 bestOrder = 0xFFFFFFFF;
+    float bestDist = 0.0f;
+    for (ObjectGuid const& guid : bc.Guids)
+    {
+        Creature* creature = map->GetCreature(guid);
+        if (!creature || !creature->IsInWorld() || !creature->IsAlive())
+            continue;
+        uint32 order = 0xFFFFFFFE; // Bosse ohne Tabelleneintrag (IsDungeonBoss) nach den Tabellen-Bossen, dann nach Naehe
+        if (tm != tableForMap.end())
+        {
+            auto o = tm->second.find(creature->GetEntry());
+            if (o != tm->second.end())
+                order = o->second;
+        }
         float dist = bot->GetDistance(creature);
-        if (!best || dist < bestDist)
+        if (!best || order < bestOrder || (order == bestOrder && dist < bestDist))
         {
             best = creature;
+            bestOrder = order;
             bestDist = dist;
         }
     }
 
     return best;
 }
-
 Creature* BotMgr::FindNearestAggroableTrash(Player* bot, float radius) const
 {
     Creature* best = nullptr;
@@ -3848,7 +5097,7 @@ Creature* BotMgr::FindNearestAggroableTrash(Player* bot, float radius) const
         Creature* creature = pair.second;
         // Dungeon-Bosse werden bewusst ausgeschlossen - die behandelt FindNearestLivingDungeonBoss()
         // separat, damit ein Boss nicht "nebenbei" wie gewoehnlicher Trash gepullt wird.
-        if (!creature || !creature->IsInWorld() || !creature->IsAlive() || creature->IsDungeonBoss())
+        if (!creature || !creature->IsInWorld() || !creature->IsAlive() || creature->IsDungeonBoss() || IsRaidTableBoss(bot->GetMapId(), creature->GetEntry()))
             continue;
         if (!bot->IsValidAttackTarget(creature))
             continue;
@@ -3921,7 +5170,8 @@ std::vector<std::string> BotMgr::FindNpcSpawnsByName(WorldObject const* center, 
         std::ostringstream line;
         line << "spawnGuid=" << pair.first << " entry=" << creature->GetEntry() << " name='"
              << creature->GetName() << "' " << (creature->IsAlive() ? "lebt" : "tot") << " dist="
-             << std::fixed << std::setprecision(1) << dist << "y pos=" << creature->GetPosition().ToString();
+             << std::fixed << std::setprecision(1) << dist << "y pos=" << creature->GetPosition().ToString()
+             << " phase=" << (center->IsInPhase(creature) ? "sichtbar" : "ANDERE-PHASE(unsichtbar)");
         results.push_back(line.str());
     }
 
@@ -4038,6 +5288,9 @@ uint32 BotMgr::SetDungeonClearModeForPlayerGroup(Player* requester, bool enable)
     if (!group)
         return 0;
 
+    // Gruppenweite Fuehrung (Bot-Tank fuehrt, Rest folgt) an/aus; die einzelnen Bot-Flags unten gelten fuer Gruppen ohne Bot-Tank
+    _groupCfg[group->GetGUID()].Enabled = enable ? 1 : 0;
+
     uint32 toggledCount = 0;
     for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
     {
@@ -4097,7 +5350,8 @@ void BotMgr::ProcessDungeonClear(uint32 accountId, uint32 diff)
     // Kampf laeuft bereits (gegen Boss ODER Trash) - ProcessBotCombatAI() bzw. der ganz normale
     // Auto-Attack-Zyklus uebernehmen, Dungeon-Clear greift erst wieder ein, sobald der Bot nicht mehr
     // kaempft.
-    if (bot->IsInCombat() || bot->IsNonMeleeSpellCast(false))
+    // Zone-Kampf von Raid-Bossen (alle Spieler der Instanz "im Kampf") zaehlt nicht: nur ein echtes Ziel/Angreifer haelt den Clear auf.
+    if (bot->GetVictim() || !bot->getAttackers().empty() || bot->IsNonMeleeSpellCast(false))
         return;
 
     if (Creature* corpse = FindNearestLootableCorpse(bot, BOT_DUNGEON_CLEAR_LOOT_RADIUS))
@@ -4108,7 +5362,38 @@ void BotMgr::ProcessDungeonClear(uint32 accountId, uint32 diff)
 
     // Trash auf dem Weg hat Vorrang vor dem Weiterlaufen zum Boss - "auf dem Weg toeten", nicht dran
     // vorbeilaufen und im Ruecken stehen lassen.
-    if (Creature* trash = FindNearestAggroableTrash(bot, BOT_DUNGEON_CLEAR_TRASH_AGGRO_RADIUS))
+    uint8 pullMode = 0; // 0 normal, 1 pack, 2 leeroy, 3 combo (siehe BotMgr.h, GroupBotConfig)
+    if (Group* cg = bot->GetGroup())
+    {
+        auto c = _groupCfg.find(cg->GetGUID());
+        if (c != _groupCfg.end())
+            pullMode = c->second.Mode;
+    }
+
+    Creature* trashTarget = pullMode == 2 ? nullptr : FindNearestAggroableTrash(bot, BOT_DUNGEON_CLEAR_TRASH_AGGRO_RADIUS); // Leeroy: Gegner ignorieren
+    if (trashTarget)
+    {
+        bool needGather = pullMode == 1;
+        if (pullMode == 3)
+        {
+            uint32 packSize = 0;
+            for (auto const& pair : bot->GetMap()->GetCreatureBySpawnIdStore())
+            {
+                Creature* other = pair.second;
+                if (other && other->IsInWorld() && other->IsAlive() && other->IsHostileTo(bot) && other->GetDistance(trashTarget) <= 15.0f)
+                    ++packSize;
+            }
+            needGather = packSize >= 3;
+        }
+        if (needGather && !IsGroupGathered(bot, 20.0f))
+        {
+            itr->second.GatherWaitMs += BOT_DUNGEON_CLEAR_TICK_MS;
+            if (itr->second.GatherWaitMs < 30000)
+                return; // auf Nachzuegler/Heiler-Mana warten, nach 30 s trotzdem pullen
+        }
+        itr->second.GatherWaitMs = 0;
+    }
+    if (Creature* trash = trashTarget)
     {
         bot->Attack(trash, true);
         bot->GetMotionMaster()->MoveChase(trash);
@@ -4127,8 +5412,16 @@ void BotMgr::ProcessDungeonClear(uint32 accountId, uint32 diff)
         return;
     }
 
+    if ((pullMode == 1 || pullMode == 3) && bot->GetDistance(boss) <= 45.0f && !IsGroupGathered(bot, 20.0f))
+    {
+        itr->second.GatherWaitMs += BOT_DUNGEON_CLEAR_TICK_MS;
+        if (itr->second.GatherWaitMs < 30000)
+            return; // vor dem Boss sammeln
+    }
+
     if (bot->GetDistance(boss) <= BOT_DUNGEON_CLEAR_ARRIVAL_DISTANCE)
     {
+        itr->second.GatherWaitMs = 0;
         // Am Boss angekommen, aber (noch) nicht im Kampf (z.B. weil der Encounter erst durch aktives
         // Angreifen ausgeloest wird) - aktiv angreifen statt daneben stehen zu bleiben.
         bot->Attack(boss, true);
@@ -4195,4 +5488,871 @@ void BotMgr::OnPlayerLogin(Player* /*player*/)
 void BotMgr::OnPlayerLogout(Player* /*player*/)
 {
     // Bewusst leer in dieser Runde.
+}
+
+
+// ---------------------------------------------------------------------------------------------------
+// OI-051 (04.10.2026): Bot-Ausbau auf eine beliebige Stufe. Ein Bot wird als Stufe-1-Charakter angelegt;
+// ProvisionBot() bringt ihn auf die gewuenschte Stufe (1-110) mit Spezialisierung, Talenten der Stufe und
+// zur Stufe passender Ausruestung (Pool-Bands 1/20/50/80/100/110, Qualitaetsstufe dauerhaft pro Bot).
+// Zauber/Faehigkeiten kommen aus Player::GiveLevel() (LearnDefaultSkills, LearnSpecializationSpells).
+// Bewusst nur AUFWAERTS (Level senken wuerde erlernte Zauber stehen lassen) - fuer eine niedrigere Stufe
+// einen neuen Bot anlegen. Liefert eine Zusammenfassung (Zauberzahl, Ilvl, Rotationsabdeckung) zurueck.
+// ---------------------------------------------------------------------------------------------------
+bool BotMgr::ProvisionBot(uint32 accountId, uint8 targetLevel, uint32 specId, uint8 role, uint16 targetIlvl, std::string& outSummary)
+{
+    auto itr = _botSessions.find(accountId);
+    if (itr == _botSessions.end() || !itr->second.Session)
+    {
+        outSummary = "keine Bot-Session (erst '.bottest login' ausfuehren)";
+        return false;
+    }
+
+    Player* player = itr->second.Session->GetPlayer();
+    if (!player || !player->IsInWorld())
+    {
+        outSummary = "Bot ist nicht in der Welt";
+        return false;
+    }
+    // Ein toter oder kaempfender Bot wird vor dem Ausbau wiederbelebt bzw. aus dem Kampf genommen.
+    if (!player->IsAlive())
+    {
+        player->ResurrectPlayer(1.0f);
+        player->SpawnCorpseBones();
+    }
+    if (player->IsInCombat())
+        player->CombatStop(true);
+
+    uint8 const maxLevel = uint8(std::min<uint32>(110, sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL)));
+    if (targetLevel < 1 || targetLevel > maxLevel)
+    {
+        outSummary = "Stufe muss zwischen 1 und " + std::to_string(maxLevel) + " liegen";
+        return false;
+    }
+
+    uint8 const oldLevel = player->getLevel();
+    if (targetLevel < oldLevel)
+    {
+        outSummary = "Stufe " + std::to_string(oldLevel) + " ist hoeher als das Ziel " + std::to_string(targetLevel)
+            + " - Provisionierung geht nur aufwaerts (neuen Bot anlegen)";
+        return false;
+    }
+
+    // 1. Stufe anheben (Zauber/Faehigkeiten/Talentreihen der Stufe kommen aus GiveLevel())
+    if (targetLevel > oldLevel)
+    {
+        player->GiveLevel(targetLevel);
+        player->SetUInt32Value(PLAYER_XP, 0);
+    }
+
+    // 2. Spezialisierung (ab Stufe 10): angegebene oder die Standard-Spezialisierung der Klasse
+    ChrSpecializationEntry const* spec = nullptr;
+    // Rolle (1 Tank, 2 Heiler, 3 Schaden) -> erste passende Spezialisierung der Klasse
+    if (!specId && role >= 1 && role <= 3)
+    {
+        for (uint32 i = 0; i < sChrSpecializationStore.GetNumRows(); ++i)
+        {
+            ChrSpecializationEntry const* candidate = sChrSpecializationStore.LookupEntry(i);
+            if (candidate && candidate->ClassID == int8(player->getClass()) && candidate->Role == int8(role - 1)
+                && (!spec || candidate->OrderIndex < spec->OrderIndex))
+                spec = candidate;
+        }
+        if (!spec)
+        {
+            outSummary = "diese Klasse hat keine Spezialisierung fuer die gewuenschte Rolle";
+            return false;
+        }
+        specId = spec->ID;
+        spec = nullptr;
+    }
+    if (specId)
+    {
+        spec = sChrSpecializationStore.LookupEntry(specId);
+        if (!spec || spec->ClassID != player->getClass())
+        {
+            outSummary = "Spezialisierung " + std::to_string(specId) + " gehoert nicht zur Klasse des Bots";
+            return false;
+        }
+        if (targetLevel >= MIN_SPECIALIZATION_LEVEL)
+            player->ActivateTalentGroup(spec);
+    }
+    uint32 const currentSpecId = player->GetUInt32Value(PLAYER_FIELD_CURRENT_SPEC_ID);
+
+    // 3. Talente: je freigeschalteter Reihe ein Talent (Spalte nach Bot-GUID gestreut), spezifisch fuer die Spec
+    uint32 talentsLearned = 0;
+    uint32 const tiers = player->GetUInt32Value(PLAYER_FIELD_MAX_TALENT_TIERS);
+    uint32 const guidLow = uint32(player->GetGUID().GetCounter());
+    for (uint32 tier = 0; tier < tiers && tier < MAX_TALENT_TIERS; ++tier)
+    {
+        bool hasTalentInTier = false;
+        for (uint32 c = 0; c < MAX_TALENT_COLUMNS && !hasTalentInTier; ++c)
+            for (TalentEntry const* t : sDB2Manager.GetTalentsByPosition(player->getClass(), tier, c))
+                if (player->HasTalent(t->ID, player->GetActiveTalentGroup()))
+                    hasTalentInTier = true;
+        if (hasTalentInTier)
+            continue;
+
+        for (uint32 attempt = 0; attempt < MAX_TALENT_COLUMNS; ++attempt)
+        {
+            uint32 column = (guidLow + tier + attempt) % MAX_TALENT_COLUMNS;
+            bool done = false;
+            for (TalentEntry const* t : sDB2Manager.GetTalentsByPosition(player->getClass(), tier, column))
+            {
+                if (t->SpecID && t->SpecID != currentSpecId)
+                    continue;
+                int32 cooldownSpell = 0;
+                if (player->LearnTalent(t->ID, &cooldownSpell) == TALENT_LEARN_OK)
+                {
+                    ++talentsLearned;
+                    done = true;
+                    break;
+                }
+            }
+            if (done)
+                break;
+        }
+    }
+
+    // 4. Ausruestung: alte Ausruestung entfernen, dann zum aktuellen Level-Band aus dem Pool neu ausruesten
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+        if (player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+            player->DestroyItem(INVENTORY_SLOT_BAG_0, slot, true);
+    // Frisch eingeloggte/teleportierte Bots tragen UNIT_STATE_STUNNED (Login-/Teleport-Zustand ohne Client-Ack):
+    // Player::CanEquipItem lehnt dann JEDES Item mit EQUIP_ERR_GENERIC_STUNNED ab. Ohne echte Betaeubung (Aura)
+    // den Zustand fuer den Ausruestungsschritt loeschen.
+    if (player->HasUnitState(UNIT_STATE_STUNNED) && !player->HasAuraType(SPELL_AURA_MOD_STUN))
+        player->ClearUnitState(UNIT_STATE_STUNNED);
+    // Rucksack leeren (Reste fehlgeschlagener Ausruestungsversuche; Bots besitzen nichts Wertvolles)
+    for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+        if (player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+            player->DestroyItem(INVENTORY_SLOT_BAG_0, slot, true);
+    g_botPoolMinIlvl = targetIlvl;
+    bool gearOk = EquipBotFromPool(accountId);
+    g_botPoolMinIlvl = 0;
+    // Reste dieses Laufs (nicht ausruestbare Items) wieder aus dem Rucksack entfernen
+    for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+        if (player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+            player->DestroyItem(INVENTORY_SLOT_BAG_0, slot, true);
+
+    // 5. Heilen, speichern
+    player->SetFullHealth();
+    player->SetFullPower(player->GetPowerType());
+    player->SaveToDB();
+
+    // 6. Zusammenfassung / Rotationsabdeckung
+    uint32 rotationKnown = 0, rotationTotal = 0;
+    if (BotSpecRotation const* rotation = GetOrResolveSpecRotation(currentSpecId))
+    {
+        for (BotRotationStep const& step : rotation->Priority)
+        {
+            ++rotationTotal;
+            if (FindKnownSpellIdByName(player, step.SpellName, rotation->SpellFamily, step.ResolvedSpellId))
+                ++rotationKnown;
+        }
+    }
+
+    // Befuellte Ruestungs-/Waffenslots (ohne Hemd 3 und Wappenrock 18) - zeigt Luecken in der Pool-Ausruestung
+    uint32 filledSlots = 0, countedSlots = 0;
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+    {
+        if (slot == EQUIPMENT_SLOT_BODY || slot == EQUIPMENT_SLOT_TABARD)
+            continue;
+        ++countedSlots;
+        if (player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+            ++filledSlots;
+    }
+
+    std::ostringstream out;
+    out << "Stufe " << uint32(oldLevel) << " -> " << uint32(player->getLevel()) << ", Spec " << currentSpecId
+        << ", Talente neu " << talentsLearned << ", bekannte Zauber " << player->GetSpellMap().size()
+        << ", Slots " << filledSlots << "/" << countedSlots
+        << ", Ilvl ausgeruestet " << std::fixed << std::setprecision(1) << player->GetAverageItemLevelEquipped()
+        << (gearOk ? "" : " (Ausruestung: kein Slot befuellt)") << ", Rotation " << rotationKnown << "/" << rotationTotal
+        << " Schritte bekannt";
+    outSummary = out.str();
+    TC_LOG_INFO("scripts.bots", "BotMgr::ProvisionBot: Account %u - %s", accountId, outSummary.c_str());
+    return true;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// OI-051 Schritt 4: Startpunkt nach Stufe. Waehlt zufaellig einen Questgeber, dessen Quests zur Stufe des
+// Bots passen (MinLevel Stufe-1..Stufe+1), die Volk/Klasse des Bots zulassen (AllowableRaces/-Classes, damit
+// Fraktion und Klasse stimmen) und der auf einem Kontinent steht (nicht in einer Phase). Dorthin wird der
+// Bot teleportiert. So stehen Bots der Stufen 1-110 in sinnvollen Gebieten statt alle am Startpunkt.
+// ---------------------------------------------------------------------------------------------------
+bool BotMgr::PlaceBotByLevel(uint32 accountId, std::string& outSummary)
+{
+    auto itr = _botSessions.find(accountId);
+    Player* player = (itr != _botSessions.end() && itr->second.Session) ? itr->second.Session->GetPlayer() : nullptr;
+    if (!player || !player->IsInWorld())
+    {
+        outSummary = "Bot ist nicht in der Welt";
+        return false;
+    }
+
+    uint32 const level = player->getLevel();
+    uint32 const raceMask = player->getRaceMask();
+    uint32 const classMask = player->getClassMask();
+
+    QueryResult result = WorldDatabase.PQuery(
+        "SELECT c.map, c.position_x, c.position_y, c.position_z, c.orientation, c.id "
+        "FROM creature_queststarter qs JOIN quest_template q ON q.ID = qs.quest JOIN creature c ON c.id = qs.id "
+        "LEFT JOIN quest_template_addon a ON a.ID = q.ID "
+        "WHERE q.MinLevel BETWEEN %u AND %u AND (q.AllowableRaces = 0 OR q.AllowableRaces = -1 OR (q.AllowableRaces & %u) <> 0) "
+        "AND (a.AllowableClasses IS NULL OR a.AllowableClasses = 0 OR (a.AllowableClasses & %u) <> 0) "
+        "AND c.map IN (0, 1, 530, 571, 870, 1116, 1220) AND c.PhaseId = 0 ORDER BY RAND() LIMIT 1",
+        level > 1 ? level - 1 : 0, level + 1, raceMask, classMask);
+
+    if (!result)
+    {
+        outSummary = "kein passender Questgeber fuer Stufe " + std::to_string(level) + " (Volk/Klasse) gefunden";
+        return false;
+    }
+
+    Field* fields = (*result).Fetch();
+    uint32 const mapId = fields[0].GetUInt16();
+    float const x = fields[1].GetFloat(), y = fields[2].GetFloat(), z = fields[3].GetFloat() + 0.5f, o = fields[4].GetFloat();
+    bool ok = TeleportBot(accountId, mapId, x, y, z, o);
+
+    std::ostringstream out;
+    out << "Stufe " << level << " -> Map " << mapId << " (" << std::fixed << std::setprecision(0) << x << ", " << y << ", " << z
+        << "), Questgeber-Entry " << fields[5].GetUInt32() << (ok ? "" : " - Teleport fehlgeschlagen");
+    outSummary = out.str();
+    return ok;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// OI-023 (04.10.2026): LFR mit vorgebauter Bot-Raidgruppe (siehe BotMgr.h). Idee aus dem Konzept des 3.3.5-Moduls
+// (bedarfsgetriebene Anmeldung nur dort, wo ein echter Spieler wartet), erweitert um Rollen-Luecken-Rechnung und eine
+// vorgebaute Gruppe als EIN Queue-Eintrag (vermeidet die Matcher-Last von 24 Einzel-Bots und Rollenueberschuss).
+// ---------------------------------------------------------------------------------------------------
+namespace
+{
+    uint8 BotLfgRoleMask(Player const* player)
+    {
+        if (ChrSpecializationEntry const* spec = sChrSpecializationStore.LookupEntry(player->GetUInt32Value(PLAYER_FIELD_CURRENT_SPEC_ID)))
+        {
+            if (spec->Role == 0)
+                return lfg::PLAYER_ROLE_TANK;
+            if (spec->Role == 1)
+                return lfg::PLAYER_ROLE_HEALER;
+        }
+        return lfg::PLAYER_ROLE_DAMAGE;
+    }
+}
+
+bool BotMgr::QueueBotRaidGroup(uint32 dungeonId, uint32 teamId, uint8 realTanks, uint8 realHealers, uint8 realDamage, std::string& outSummary)
+{
+    using namespace lfg;
+
+    LFGDungeonData const* dungeon = sLFGMgr->GetLFGDungeon(dungeonId);
+    if (!dungeon || dungeon->subtype != LFG_SUBTYPE_LFR)
+    {
+        outSummary = "kein LFR-Fluegel";
+        return false;
+    }
+
+    lfg::LfgQueueRoleCount const roleCount = LFGMgr::GetRoleCountByQueueId(dungeonId);
+    int const need[3] =
+    {
+        std::max(0, int(roleCount.maxTanks) - int(realTanks)),
+        std::max(0, int(roleCount.maxHealers) - int(realHealers)),
+        std::max(0, int(roleCount.maxDamages) - int(realDamage))
+    };
+
+    struct Candidate { uint32 Account; Player* Bot; };
+    std::vector<Candidate> pool[3]; // 0 Tank, 1 Heiler, 2 Schaden
+    for (auto& [accountId, entry] : _botSessions)
+    {
+        if (!entry.Session || entry.State != BotCharacterState::STATE_IN_WORLD)
+            continue;
+        if (_lfgFillerBotAccountIds.count(accountId) || _lfgTestRealAccounts.count(accountId))
+            continue;
+        Player* bot = entry.Session->GetPlayer();
+        if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->GetGroup() || bot->GetMap()->Instanceable())
+            continue;
+        if (bot->GetTeamId() != TeamId(teamId) || bot->getLevel() < dungeon->minlevel)
+            continue;
+        if (bot->GetAverageItemLevelEquipped() < float(dungeon->requiredItemLevel))
+            continue;
+        if (sLFGMgr->GetState(bot->GetGUID()) != LFG_STATE_NONE)
+            continue;
+        uint8 const mask = BotLfgRoleMask(bot);
+        pool[mask == PLAYER_ROLE_TANK ? 0 : (mask == PLAYER_ROLE_HEALER ? 1 : 2)].push_back({ accountId, bot });
+    }
+
+    std::ostringstream have;
+    have << "Kandidaten Tank " << pool[0].size() << "/" << need[0] << ", Heiler " << pool[1].size() << "/" << need[1]
+         << ", Schaden " << pool[2].size() << "/" << need[2] << " (Stufe >= " << uint32(dungeon->minlevel) << ", Ilvl >= " << dungeon->requiredItemLevel << ")";
+    for (int r = 0; r < 3; ++r)
+        if (int(pool[r].size()) < need[r])
+        {
+            outSummary = "zu wenige geeignete Bots: " + have.str();
+            return false;
+        }
+
+    // zufaellig je Rolle auswaehlen
+    std::vector<Candidate> members[3];
+    for (int r = 0; r < 3; ++r)
+    {
+        std::vector<Candidate>& src = pool[r];
+        for (int i = 0; i < need[r]; ++i)
+        {
+            uint32 idx = urand(0, uint32(src.size() - 1));
+            members[r].push_back(src[idx]);
+            src.erase(src.begin() + idx);
+        }
+    }
+
+    // Anfuehrer: bevorzugt ein Schadens-Bot, sonst Heiler, sonst Tank
+    Candidate leader{ 0, nullptr };
+    for (int r : { 2, 1, 0 })
+        if (!members[r].empty())
+        {
+            leader = members[r].front();
+            members[r].erase(members[r].begin());
+            break;
+        }
+    if (!leader.Bot)
+    {
+        outSummary = "keine Mitglieder noetig (Rollenluecke 0)";
+        return false;
+    }
+
+    Group* group = new Group();
+    if (!group->Create(leader.Bot))
+    {
+        delete group;
+        outSummary = "Group::Create fehlgeschlagen";
+        return false;
+    }
+    sGroupMgr->AddGroup(group);
+    group->ConvertToRaid();
+
+    LfrBotGroup tracked;
+    tracked.QueueId = dungeonId;
+    tracked.Team = teamId;
+    tracked.Created = time(nullptr);
+    tracked.Accounts.push_back(leader.Account);
+    std::vector<std::pair<Candidate, uint8>> others;
+    for (int r = 0; r < 3; ++r)
+        for (Candidate const& m : members[r])
+        {
+            if (!group->AddMember(m.Bot))
+            {
+                TC_LOG_ERROR("scripts.bots", "BotMgr::QueueBotRaidGroup: Group::AddMember(Account %u) fehlgeschlagen - uebersprungen.", m.Account);
+                continue;
+            }
+            tracked.Accounts.push_back(m.Account);
+            others.push_back({ m, BotLfgRoleMask(m.Bot) });
+        }
+    group->BroadcastGroupUpdate();
+    tracked.GroupGuid = group->GetGUID();
+
+    // In die Raidfinder-Warteschlange: der Anfuehrer meldet die Gruppe an, danach beantworten die uebrigen Bots den Rollencheck.
+    LfgDungeonSet dungeons;
+    dungeons.insert(dungeonId);
+    sLFGMgr->JoinLfg(leader.Bot, BotLfgRoleMask(leader.Bot), dungeons);
+    ObjectGuid const gguid = group->GetGUID();
+    for (auto const& [m, mask] : others)
+        sLFGMgr->UpdateRoleCheck(gguid, m.Bot->GetGUID(), mask);
+
+    LfgState const state = sLFGMgr->GetState(gguid);
+    for (uint32 acc : tracked.Accounts)
+        _lfgFillerBotAccountIds.insert(acc);
+
+    std::ostringstream out;
+    out << "Raidgruppe mit " << tracked.Accounts.size() << " Bots fuer LFR-Fluegel " << dungeonId << " (" << dungeon->name << ") gebaut, LFG-Zustand der Gruppe "
+        << uint32(state) << " (1 Rollencheck, 2 Warteschlange); " << have.str();
+    outSummary = out.str();
+    _lfrBotGroups.push_back(tracked);
+    TC_LOG_INFO("scripts.bots", "BotMgr::QueueBotRaidGroup: %s", outSummary.c_str());
+    return true;
+}
+
+void BotMgr::HandleLfrDemand()
+{
+    using namespace lfg;
+    struct Demand { uint8 Tanks = 0, Healers = 0, Damage = 0; };
+    std::map<std::pair<uint32, uint32>, Demand> demand; // (Fluegel, Fraktion) -> wartende echte Spieler nach Rolle
+
+    for (uint8 team = TEAM_ALLIANCE; team <= TEAM_HORDE; ++team)
+    {
+        LfgQueueContainer const& queues = sLFGMgr->GetQueuesForTeam(team);
+        for (auto const& [queueId, queue] : queues)
+        {
+            LFGDungeonData const* dungeon = sLFGMgr->GetLFGDungeon(queueId);
+            if (!dungeon || dungeon->subtype != LFG_SUBTYPE_LFR)
+                continue;
+            for (auto const& [candidateGuid, data] : queue.GetQueueDataStore())
+                for (auto const& [memberGuid, role] : data.roles)
+                {
+                    if (IsBotPlayerGuid(memberGuid))
+                        continue;
+                    Demand& d = demand[{ queueId, uint32(team) }];
+                    if (role & PLAYER_ROLE_TANK)
+                        ++d.Tanks;
+                    else if (role & PLAYER_ROLE_HEALER)
+                        ++d.Healers;
+                    else
+                        ++d.Damage;
+                }
+        }
+    }
+
+    // vorhandene Bot-Gruppen pflegen: Match zustande gekommen -> nicht mehr verfolgen; Spieler weg -> Gruppe aufloesen
+    time_t const now = time(nullptr);
+    for (auto itr = _lfrBotGroups.begin(); itr != _lfrBotGroups.end();)
+    {
+        LfgState const state = sLFGMgr->GetState(itr->GroupGuid);
+        bool const realWaiting = demand.count({ itr->QueueId, itr->Team }) > 0;
+        bool remove = false;
+        if (state == LFG_STATE_DUNGEON || state == LFG_STATE_FINISHED_DUNGEON)
+            remove = true;
+        else if (state == LFG_STATE_NONE && now - itr->Created > 30)
+            remove = true; // hat sich selbst aufgeloest (z. B. Match -> neue LFG-Gruppe)
+        else if (!realWaiting && now - itr->Created > 60 && (state == LFG_STATE_QUEUED || state == LFG_STATE_ROLECHECK))
+        {
+            sLFGMgr->LeaveLfg(itr->GroupGuid);
+            if (Group* group = sGroupMgr->GetGroupByGUID(itr->GroupGuid))
+                group->Disband();
+            for (uint32 acc : itr->Accounts)
+                _lfgFillerBotAccountIds.erase(acc);
+            TC_LOG_INFO("scripts.bots", "BotMgr::HandleLfrDemand: Bot-Raidgruppe fuer Fluegel %u aufgeloest (kein Spieler wartet mehr).", itr->QueueId);
+            remove = true;
+        }
+        itr = remove ? _lfrBotGroups.erase(itr) : std::next(itr);
+    }
+
+    // neuer Bedarf: pro (Fluegel, Fraktion) eine Gruppe, hoechstens eine pro Takt, mit Abkuehlzeit nach Fehlschlag
+    for (auto const& [key, d] : demand)
+    {
+        bool tracked = false;
+        for (LfrBotGroup const& g : _lfrBotGroups)
+            if (g.QueueId == key.first && g.Team == key.second)
+                tracked = true;
+        if (tracked)
+            continue;
+        uint64 const failKey = (uint64(key.first) << 8) | key.second;
+        auto fail = _lfrFailUntil.find(failKey);
+        if (fail != _lfrFailUntil.end() && fail->second > now)
+            continue;
+
+        std::string summary;
+        if (!QueueBotRaidGroup(key.first, key.second, d.Tanks, d.Healers, d.Damage, summary))
+        {
+            _lfrFailUntil[failKey] = now + 60;
+            // zu wenige Bots eingeloggt -> offline gehaltene Pool-Bots dieser Fraktion nachladen (ein spaeterer Versuch baut die Gruppe)
+            if (uint32 started = EnsureLfrPoolOnline(key.second, 30))
+                TC_LOG_INFO("scripts.bots", "BotMgr::HandleLfrDemand: %u Raid-Pool-Bots (Fraktion %u) werden eingeloggt.", started, key.second);
+            TC_LOG_INFO("scripts.bots", "BotMgr::HandleLfrDemand: Fluegel %u (Fraktion %u): keine Bot-Raidgruppe moeglich - %s", key.first, key.second, summary.c_str());
+        }
+        break;
+    }
+}
+
+bool BotMgr::TestQueueBotAsRealPlayer(uint32 accountId, uint32 dungeonId, uint8 roleMask, std::string& outSummary)
+{
+    using namespace lfg;
+    Player* bot = GetBotPlayer(accountId);
+    if (!bot || !bot->IsInWorld())
+    {
+        outSummary = "Bot ist nicht in der Welt";
+        return false;
+    }
+    if (bot->GetGroup())
+    {
+        outSummary = "Bot ist in einer Gruppe";
+        return false;
+    }
+    _lfgTestRealAccounts.insert(accountId);
+    _lfgFillerBotAccountIds.insert(accountId); // nur damit AdvanceLfgFillerBots den Vorschlag fuer den fehlenden Client annimmt
+    LfgDungeonSet dungeons;
+    dungeons.insert(dungeonId);
+    sLFGMgr->JoinLfg(bot, roleMask, dungeons);
+    LfgState const state = sLFGMgr->GetState(bot->GetGUID());
+    std::ostringstream out;
+    out << "Bot '" << bot->GetName() << "' als wartender 'echter Spieler' fuer Fluegel " << dungeonId << " angemeldet, LFG-Zustand " << uint32(state)
+        << " (3 = in der Warteschlange)";
+    outSummary = out.str();
+    return state != LFG_STATE_NONE;
+}
+
+std::string BotMgr::LfrStatus() const
+{
+    std::ostringstream out;
+    out << "Vorgebaute LFR-Bot-Gruppen: " << _lfrBotGroups.size();
+    for (LfrBotGroup const& g : _lfrBotGroups)
+        out << " | Fluegel " << g.QueueId << " Fraktion " << g.Team << " Bots " << g.Accounts.size() << " Zustand "
+            << uint32(sLFGMgr->GetState(g.GroupGuid)) << " Alter " << (time(nullptr) - g.Created) << " s";
+    out << " | Testkonten als echte Spieler: " << _lfgTestRealAccounts.size() << " | Fueller-Bots: " << _lfgFillerBotAccountIds.size();
+    return out.str();
+}
+
+uint32 BotMgr::EnsureLfrPoolOnline(uint32 teamId, uint32 maxLogins)
+{
+    if (teamId > 1)
+        return 0;
+
+    if (!_lfrPoolLoaded)
+    {
+        _lfrPoolLoaded = true;
+        // einmaliger, synchroner Lesezugriff (Konten-Praefix LFRBOT, Fraktion ueber das Volk des ersten Charakters)
+        if (QueryResult result = CharacterDatabase.Query("SELECT ch.`account`, ch.`race` FROM `characters` ch JOIN `auth`.`account` a ON a.`id` = ch.`account` "
+            "WHERE a.`username` LIKE 'LFRBOT%' GROUP BY ch.`account`, ch.`race` ORDER BY ch.`account`"))
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+                uint32 const accountId = fields[0].GetUInt32();
+                uint8 const race = fields[1].GetUInt8();
+                _lfrPoolAccounts[Player::TeamForRace(race) == HORDE ? 1 : 0].push_back(accountId);
+            } while (result->NextRow());
+        }
+        TC_LOG_INFO("scripts.bots", "BotMgr::EnsureLfrPoolOnline: Raid-Pool geladen: Allianz %u, Horde %u Konten.",
+            uint32(_lfrPoolAccounts[0].size()), uint32(_lfrPoolAccounts[1].size()));
+    }
+
+    uint32 started = 0;
+    for (uint32 accountId : _lfrPoolAccounts[teamId])
+    {
+        if (started >= maxLogins)
+            break;
+        auto itr = _botSessions.find(accountId);
+        if (itr != _botSessions.end() && (itr->second.State == BotCharacterState::STATE_IN_WORLD || itr->second.State != BotCharacterState::STATE_UNINITIALIZED))
+            continue; // bereits online oder gerade im Login
+        if (RequestBotLoginExistingAccount(accountId))
+            ++started;
+    }
+    return started;
+}
+// Raid-/Dungeon-Verhalten (04.10.2026, Plan aus RAIDBOTS_RECHERCHE.md, Schritte 2, 7, 8): ~1 s-Tick fuer Bots auf Instanzkarten.
+//  - Wipe: tote Bots werden nach 15 s Geist (HandleBotDeath) und am Friedhof wiederbelebt (ReviveBotAtGraveyard); ein Heiler kann vorher
+//    per Rezz-Zauber helfen (ProcessBotCombatAI). Danach laufen Folgen/Dungeon-Clear automatisch wieder an.
+//  - Folgen (Schritt 8): ist ein ECHTER Spieler in der Gruppe auf derselben Karte, folgen die Bots ihm (Teleport bei > 80 yd).
+//  - Dungeon-Clear (Schritt 2): in reinen Bot-Gruppen wird der Modus automatisch aktiviert, sobald die Gruppe auf einer Instanzkarte steht.
+void BotMgr::ProcessBotGroupInstance(uint32 accountId, uint32 diff)
+{
+    auto itr = _botSessions.find(accountId);
+    if (itr == _botSessions.end() || !itr->second.Session)
+        return;
+
+    BotSessionEntry& e = itr->second;
+    e.GroupTickAccumMs += diff;
+    if (e.GroupTickAccumMs < 1000)
+        return;
+    uint32 const elapsed = e.GroupTickAccumMs;
+    e.GroupTickAccumMs = 0;
+
+    Player* bot = e.Session->GetPlayer();
+    if (!bot || !bot->IsInWorld())
+        return;
+
+    Map* map = bot->GetMap();
+    Group* group = bot->GetGroup();
+    if (!map->IsDungeon() || !group)
+    {
+        e.DungeonClearAuto = false;
+        e.DeadMs = 0;
+        return;
+    }
+
+    // --- Wipe-Behandlung ---
+    if (!bot->IsAlive())
+    {
+        e.DeadMs += elapsed;
+        if (bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
+        {
+            ReviveBotAtGraveyard(accountId);
+            e.DeadMs = 0;
+            e.DungeonClearAuto = false;
+        }
+        else if (e.DeadMs >= 15000)
+        {
+            bool groupFighting = false;
+            for (GroupReference* gr = group->GetFirstMember(); gr; gr = gr->next())
+                if (Player* m = gr->GetSource())
+                    if (m->IsAlive() && m->IsInCombat())
+                        groupFighting = true;
+            if (!groupFighting)
+                HandleBotDeath(accountId);
+        }
+        return;
+    }
+    e.DeadMs = 0;
+
+    // Diagnose: der Gruppenfuehrer-Bot schreibt alle 15 s eine Zusammenfassung der Gruppe (Lage im Raid ohne Client nachvollziehbar)
+    // (der erste lebende Bot der Gruppe schreibt - ist der Fuehrer tot, bliebe das Log sonst stumm)
+    Player* statusWriter = nullptr;
+    for (GroupReference* gr = group->GetFirstMember(); gr && !statusWriter; gr = gr->next())
+        if (Player* m = gr->GetSource())
+            if (m->IsAlive() && m->IsInWorld() && m->GetMapId() == bot->GetMapId() && IsBotPlayerGuid(m->GetGUID()))
+                statusWriter = m;
+    if (bot == statusWriter)
+    {
+        e.PositionMoveCooldownMs += elapsed;
+        if (e.PositionMoveCooldownMs >= 15000)
+        {
+            e.PositionMoveCooldownMs = 0;
+            uint32 alive = 0, dead = 0, fighting = 0, clearing = 0, hasTarget = 0;
+            for (GroupReference* gr = group->GetFirstMember(); gr; gr = gr->next())
+                if (Player* m = gr->GetSource())
+                {
+                    if (!m->IsAlive()) { ++dead; continue; }
+                    ++alive;
+                    if (m->IsInCombat()) ++fighting;
+                    if (m->GetVictim()) ++hasTarget;
+                    uint32 const acc = GetBotAccountIdByGuid(m->GetGUID());
+                    if (acc && IsDungeonClearModeActive(acc)) ++clearing;
+                }
+            Unit* v = bot->GetVictim();
+            TC_LOG_INFO("scripts.bots", "BotMgr::RaidStatus: Karte %u, Gruppe %u Bots: %u lebend, %u tot, %u im Kampf, %u mit Ziel, %u im Dungeon-Clear; Leiter bei (%.0f, %.0f, %.0f), Ziel '%s' (Entfernung %.0f).",
+                map->GetId(), group->GetMembersCount(), alive, dead, fighting, hasTarget, clearing, bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(),
+                v ? v->GetName().c_str() : "-", v ? bot->GetDistance(v) : 0.0f);
+            // Diagnose Teil 2: Angreifer des Leiters und feindliche Gegner im Umkreis von 60 yd
+            std::ostringstream nearList;
+            uint32 listed = 0;
+            for (auto const& pair : map->GetCreatureBySpawnIdStore())
+            {
+                Creature* c = pair.second;
+                if (!c || !c->IsInWorld() || !c->IsAlive() || !c->IsHostileTo(bot) || bot->GetDistance(c) > 60.0f)
+                    continue;
+                if (listed++ < 6)
+                    nearList << " [" << c->GetName() << " e" << c->GetEntry() << " d" << uint32(bot->GetDistance(c)) << " hp" << uint32(c->GetHealthPct()) << "%" << (c->IsInCombat() ? " Kampf" : "") << " Opfer:" << (c->GetVictim() ? c->GetVictim()->GetName() : std::string("-")) << "]";
+            }
+            TC_LOG_INFO("scripts.bots", "BotMgr::RaidStatus: Leiter hat %u Angreifer, %u feindliche Gegner <= 60 yd:%s",
+                uint32(bot->getAttackers().size()), listed, nearList.str().c_str());
+
+            // Diagnose Teil 3: wie viele Bots stehen in Reichweite des am meisten verletzten kaempfenden Gegners und wirken gerade
+            Creature* foe = nullptr;
+            for (auto const& pair : map->GetCreatureBySpawnIdStore())
+            {
+                Creature* c = pair.second;
+                if (c && c->IsInWorld() && c->IsAlive() && c->IsInCombat() && c->IsHostileTo(bot) && bot->GetDistance(c) <= 80.0f
+                    && (!foe || c->GetMaxHealth() > foe->GetMaxHealth()))
+                    foe = c;
+            }
+            if (foe)
+            {
+                uint32 in10 = 0, in40 = 0, casting = 0, noLos = 0, tanksOnFoe = 0;
+                for (GroupReference* gr = group->GetFirstMember(); gr; gr = gr->next())
+                    if (Player* m = gr->GetSource())
+                        if (m->IsAlive())
+                        {
+                            float const d = m->GetDistance(foe);
+                            if (d <= 10.0f) ++in10;
+                            if (d <= 40.0f) ++in40;
+                            if (m->IsNonMeleeSpellCast(false)) ++casting;
+                            if (!m->IsWithinLOSInMap(foe)) ++noLos;
+                            if (foe->GetVictim() == m) ++tanksOnFoe;
+                        }
+                TC_LOG_INFO("scripts.bots", "BotMgr::RaidStatus: Hauptgegner '%s' hp %.1f%%: %u Bots <= 10 yd, %u <= 40 yd, %u wirken gerade, %u ohne Sichtlinie.",
+                    foe->GetName().c_str(), foe->GetHealthPct(), in10, in40, casting, noLos);
+            }
+        }
+    }
+
+    // --- Fuehrung bestimmen ---
+    // Echter Spieler (naechster/Gruppenleiter, auch der Test-Bot zaehlt hier als Bot) und ob er Tank ist (Spec-Rolle 0).
+    Player* real = nullptr;
+    for (GroupReference* gr = group->GetFirstMember(); gr; gr = gr->next())
+    {
+        Player* m = gr->GetSource();
+        if (!m || !m->IsInWorld() || GetBotAccountIdByGuid(m->GetGUID()) != 0 || m->GetMapId() != bot->GetMapId() || !m->IsAlive())
+            continue;
+        if (!real || m->GetGUID() == group->GetLeaderGUID())
+            real = m;
+    }
+    auto isTankSpec = [](Player const* p)
+    {
+        ChrSpecializationEntry const* spec = sChrSpecializationStore.LookupEntry(p->GetUInt32Value(PLAYER_FIELD_CURRENT_SPEC_ID));
+        return spec && spec->Role == 0;
+    };
+
+    auto cfgItr = _groupCfg.find(group->GetGUID());
+    GroupBotConfig const* cfg = cfgItr != _groupCfg.end() ? &cfgItr->second : nullptr;
+    Player* leadTank = ResolveLeadTank(group, cfg);
+    bool const leadChosen = cfg && !cfg->Lead.IsEmpty();
+    bool const enabled = cfg && cfg->Enabled != -1 ? cfg->Enabled == 1 : (real == nullptr);
+
+    auto stopOwnClear = [&]()
+    {
+        if (e.DungeonClearActive && e.DungeonClearAuto)
+        {
+            e.DungeonClearActive = false;
+            e.DungeonClearAuto = false;
+        }
+    };
+    auto followTarget = [&](Player* target)
+    {
+        // "im Kampf" allein haelt nicht auf: Raid-Bosse setzen per Zone-Kampf ALLE Spieler der Instanz in den Kampfstatus (auch weit
+        // entfernte). Nur ein echtes Ziel oder echte Angreifer stoppen das Folgen.
+        if (e.DungeonClearActive || !target || target == bot || bot->GetVictim() || !bot->getAttackers().empty())
+            return;
+        float const dist = bot->GetDistance(target);
+        if (dist > 80.0f)
+            TeleportBot(accountId, target->GetMapId(), target->GetPositionX(), target->GetPositionY(), target->GetPositionZ() + 0.5f, target->GetOrientation());
+        else if (dist > 8.0f && bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != FOLLOW_MOTION_TYPE)
+            StartBotFollow(accountId, target->GetGUID());
+    };
+
+    // 1. Ein echter Tank in der Gruppe fuehrt, solange kein Bot-Tank ausdruecklich gewaehlt wurde: Bots folgen ihm, kein eigener Clear.
+    if (real && isTankSpec(real) && !leadChosen)
+    {
+        stopOwnClear();
+        followTarget(real);
+        return;
+    }
+
+    // 2. Ein Bot-Tank fuehrt (reine Bot-Gruppe, "!dc on" oder "!dc lead <Bot>"): nur er laeuft den Dungeon-Clear, alle anderen folgen ihm.
+    if (leadTank && enabled)
+    {
+        if (bot == leadTank)
+        {
+            if (!e.DungeonClearActive)
+            {
+                e.DungeonClearAuto = true;
+                e.DungeonClearActive = true;
+                TC_LOG_INFO("scripts.bots", "BotMgr::ProcessBotGroupInstance: Bot-Tank %u fuehrt die Gruppe auf Karte %u (Modus %u).",
+                    accountId, map->GetId(), cfg ? uint32(cfg->Mode) : 0u);
+            }
+        }
+        else
+        {
+            e.DungeonClearActive = false;
+            e.DungeonClearAuto = false;
+            followTarget(leadTank);
+        }
+        return;
+    }
+
+    // 3. Echter Nicht-Tank (oder kein Lead aktiv): Bots folgen dem Spieler, bis ihm per Addon ein Bot-Tank die Fuehrung gegeben wird.
+    if (real)
+    {
+        stopOwnClear();
+        followTarget(real);
+        return;
+    }
+
+    // 4. Reine Bot-Gruppe ohne Tank: jeder Bot laeuft den Dungeon-Clear selbst (alter Behelf, Schritt 2)
+    if (!e.DungeonClearActive && !e.DungeonClearAuto && !(cfg && cfg->Enabled == 0))
+    {
+        e.DungeonClearAuto = true;
+        e.DungeonClearActive = true;
+        TC_LOG_INFO("scripts.bots", "BotMgr::ProcessBotGroupInstance: Account %u - reine Bot-Gruppe ohne Tank auf Instanzkarte %u, Dungeon-Clear automatisch gestartet.",
+            accountId, map->GetId());
+    }
+}
+
+// Fuehrender Bot-Tank: gewaehlter Bot (cfg->Lead), sonst der erste lebende Bot-Tank der Gruppe auf derselben Karte
+Player* BotMgr::ResolveLeadTank(Group* group, GroupBotConfig const* cfg) const
+{
+    if (!group)
+        return nullptr;
+    Player* fallback = nullptr;
+    for (GroupReference* gr = group->GetFirstMember(); gr; gr = gr->next())
+    {
+        Player* m = gr->GetSource();
+        if (!m || !m->IsInWorld() || !m->IsAlive() || GetBotAccountIdByGuid(m->GetGUID()) == 0)
+            continue;
+        if (cfg && !cfg->Lead.IsEmpty() && m->GetGUID() == cfg->Lead)
+            return m;
+        ChrSpecializationEntry const* spec = sChrSpecializationStore.LookupEntry(m->GetUInt32Value(PLAYER_FIELD_CURRENT_SPEC_ID));
+        if (!fallback && spec && spec->Role == 0)
+            fallback = m;
+    }
+    return (cfg && !cfg->Lead.IsEmpty()) ? fallback : fallback;
+}
+
+bool BotMgr::IsGroupGathered(Player* lead, float radius) const
+{
+    Group* group = lead->GetGroup();
+    if (!group)
+        return true;
+    uint32 nearCount = 0, total = 0;
+    for (GroupReference* gr = group->GetFirstMember(); gr; gr = gr->next())
+    {
+        Player* m = gr->GetSource();
+        if (!m || m == lead || !m->IsInWorld() || !m->IsAlive() || m->GetMapId() != lead->GetMapId())
+            continue;
+        ++total;
+        if (lead->GetDistance(m) <= radius)
+            ++nearCount;
+        // Heiler mit weniger als 50 % Mana: erst rasten lassen
+        if (m->GetPowerType() == POWER_MANA && GetBotRole(GetBotAccountIdByGuid(m->GetGUID())) == BotRole::Healer && m->GetPowerPct(POWER_MANA) < 50.0f)
+            return false;
+    }
+    return total == 0 || nearCount * 100 >= total * 80;
+}
+
+std::string BotMgr::SetGroupLead(Player* requester, std::string const& botName)
+{
+    Group* group = requester ? requester->GetGroup() : nullptr;
+    if (!group)
+        return "[AshDC] Du bist in keiner Gruppe.";
+    for (GroupReference* gr = group->GetFirstMember(); gr; gr = gr->next())
+    {
+        Player* m = gr->GetSource();
+        if (!m || GetBotAccountIdByGuid(m->GetGUID()) == 0 || _stricmp(m->GetName().c_str(), botName.c_str()) != 0)
+            continue;
+        ChrSpecializationEntry const* spec = sChrSpecializationStore.LookupEntry(m->GetUInt32Value(PLAYER_FIELD_CURRENT_SPEC_ID));
+        if (!spec || spec->Role != 0)
+            return "[AshDC] " + m->GetName() + " ist kein Tank.";
+        GroupBotConfig& cfg = _groupCfg[group->GetGUID()];
+        cfg.Lead = m->GetGUID();
+        cfg.Enabled = 1;
+        static char const* const modeNames[] = { "normal", "pack", "leeroy", "combo" };
+        return "[AshDC] Fuehrung: " + m->GetName() + ", Modus " + modeNames[cfg.Mode] + ", an.";
+    }
+    return "[AshDC] Kein Bot mit dem Namen '" + botName + "' in deiner Gruppe.";
+}
+
+std::string BotMgr::SetGroupMode(Player* requester, std::string const& modeName)
+{
+    Group* group = requester ? requester->GetGroup() : nullptr;
+    if (!group)
+        return "[AshDC] Du bist in keiner Gruppe.";
+    uint8 mode;
+    if (modeName == "normal") mode = 0;
+    else if (modeName == "pack") mode = 1;
+    else if (modeName == "leeroy") mode = 2;
+    else if (modeName == "combo") mode = 3;
+    else return "[AshDC] Unbekannter Modus (normal, pack, leeroy, combo).";
+    _groupCfg[group->GetGUID()].Mode = mode;
+    return "[AshDC] Pull-Modus: " + modeName + ".";
+}
+
+std::string BotMgr::GroupLeadStatus(Player* requester)
+{
+    Group* group = requester ? requester->GetGroup() : nullptr;
+    if (!group)
+        return "[AshDC] Du bist in keiner Gruppe.";
+    auto itr = _groupCfg.find(group->GetGUID());
+    GroupBotConfig const* cfg = itr != _groupCfg.end() ? &itr->second : nullptr;
+    Player* lead = ResolveLeadTank(group, cfg);
+    static char const* const names[] = { "normal", "pack", "leeroy", "combo" };
+    return std::string("[AshDC] Fuehrung: ") + (lead ? lead->GetName() : std::string("-")) + ", Modus " + names[cfg ? cfg->Mode : 0]
+        + (cfg && cfg->Enabled == 1 ? ", an" : (cfg && cfg->Enabled == 0 ? ", aus" : ", automatisch")) + ".";
+}
+uint32 BotMgr::SummonGroupBots(Player* me, uint32& moved)
+{
+    moved = 0;
+    Group* group = me ? me->GetGroup() : nullptr;
+    if (!group)
+        return 0;
+    uint32 total = 0;
+    for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+    {
+        Player* member = itr->GetSource();
+        if (!member || member == me || !IsBotPlayerGuid(member->GetGUID()))
+            continue;
+        ++total;
+        uint32 const accountId = GetBotAccountIdByGuid(member->GetGUID());
+        float const angle = frand(0.0f, 6.2831853f);
+        float const dist = frand(1.0f, 4.0f);
+        if (accountId && TeleportBot(accountId, me->GetMapId(), me->GetPositionX() + std::cos(angle) * dist,
+            me->GetPositionY() + std::sin(angle) * dist, me->GetPositionZ() + 0.5f, me->GetOrientation()))
+            ++moved;
+    }
+    return total;
 }

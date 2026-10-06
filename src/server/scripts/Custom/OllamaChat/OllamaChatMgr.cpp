@@ -22,11 +22,61 @@
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "SharedDefines.h"
+#include <algorithm>
 #include <cctype>
 #include <sstream>
 
 namespace
 {
+    // Bereinigt eine Modellantwort fuer den Whisper (OI-018): Zeilenumbrueche/Tabs -> Leerzeichen,
+    // gerade und typografische Anfuehrungszeichen entfernen, Mehrfach-Leerzeichen zusammenfassen,
+    // Anfang/Ende trimmen, Laenge auf ~200 Bytes begrenzen (nie mitten in einem UTF-8-Zeichen).
+    std::string SanitizeReplyText(std::string in)
+    {
+        auto eraseAll = [](std::string& s, std::string const& what)
+        {
+            for (std::string::size_type pos = s.find(what); pos != std::string::npos; pos = s.find(what, pos))
+                s.erase(pos, what.size());
+        };
+        // typografische Anfuehrungszeichen (UTF-8): „ “ ” ‚ ‘ ’ « »
+        for (char const* q : { "\xE2\x80\x9E", "\xE2\x80\x9C", "\xE2\x80\x9D", "\xE2\x80\x9A", "\xE2\x80\x98",
+                               "\xE2\x80\x99", "\xC2\xAB", "\xC2\xBB" })
+            eraseAll(in, q);
+        std::string out;
+        out.reserve(in.size());
+        bool lastSpace = true;
+        for (char c : in)
+        {
+            if (c == '"')
+                continue;
+            if (c == '\n' || c == '\r' || c == '\t')
+                c = ' ';
+            if (c == ' ')
+            {
+                if (lastSpace)
+                    continue;
+                lastSpace = true;
+            }
+            else
+                lastSpace = false;
+            out += c;
+        }
+        while (!out.empty() && out.back() == ' ')
+            out.pop_back();
+
+        std::size_t const maxBytes = 200;
+        if (out.size() > maxBytes)
+        {
+            std::size_t cut = maxBytes;
+            while (cut > 0 && (static_cast<unsigned char>(out[cut]) & 0xC0) == 0x80)
+                --cut;
+            out.resize(cut);
+            while (!out.empty() && out.back() == ' ')
+                out.pop_back();
+        }
+        return out;
+    }
+
     // Minimaler JSON-String-Escaper - siehe OllamaHttpClient.h-Kopfkommentar fuer die Begruendung,
     // warum hier bewusst kein voller JSON-Objektmodell/keine Bibliothek verwendet wird. Deckt alle
     // Faelle ab, die in einem Chat-Text/Prompt realistisch vorkommen (Anfuehrungszeichen, Backslash,
@@ -118,10 +168,12 @@ void OllamaChatMgr::LoadConfig()
     _model = sConfigMgr->GetStringDefault("OllamaChat.Model", "llama3");
     _systemPrompt = sConfigMgr->GetStringDefault("OllamaChat.SystemPrompt", _systemPrompt);
     _maxConcurrentRequests = uint32(sConfigMgr->GetIntDefault("OllamaChat.MaxConcurrentRequests", 4));
+    int32 const timeoutCfg = sConfigMgr->GetIntDefault("OllamaChat.TimeoutSeconds", 30);
+    _requestTimeoutSeconds = uint32(timeoutCfg < 1 ? 1 : (timeoutCfg > 600 ? 600 : timeoutCfg));
 
     TC_LOG_INFO("scripts.ollamachat", "OllamaChatMgr::LoadConfig: Enable=%d, Host=%s, Port=%u, Model=%s, "
-        "MaxConcurrentRequests=%u.", _enabled, _host.c_str(), uint32(_port), _model.c_str(),
-        _maxConcurrentRequests);
+        "MaxConcurrentRequests=%u, TimeoutSeconds=%u.", _enabled, _host.c_str(), uint32(_port), _model.c_str(),
+        _maxConcurrentRequests, _requestTimeoutSeconds);
 }
 
 std::string OllamaChatMgr::BuildRequestJson(std::string const& prompt) const
@@ -158,9 +210,13 @@ void OllamaChatMgr::RequestBotReply(Player* bot, Player* sender, std::string con
     // OllamaChatMgr.h-Kopfkommentar. Eine vollstaendige Kontext-Anreicherung (Klasse/Rasse/Fraktion/
     // Gilde/Gespraechsverlauf wie im Referenzmodul) ist bewusst NICHT Teil dieser ersten Runde.
     std::ostringstream prompt;
-    prompt << "You are " << bot->GetName() << ", a level " << uint32(bot->getLevel())
-           << " World of Warcraft character. " << sender->GetName() << " just whispered you: \""
-           << senderMessage << "\". Reply in-character as " << bot->GetName() << " in one short chat line.";
+    // Deutscher Nutzer-Prompt (OI-018): passt zum deutschen System-Prompt; Anfuehrungszeichen im
+    // Whisper-Text werden entschaerft, damit sie die Prompt-Struktur nicht aufbrechen.
+    std::string quotedMessage = senderMessage;
+    std::replace(quotedMessage.begin(), quotedMessage.end(), '"', '\'');
+    prompt << "Du bist " << bot->GetName() << ", ein Charakter der Stufe " << uint32(bot->getLevel())
+           << " in World of Warcraft. " << sender->GetName() << " hat dir gerade zugefluestert: \""
+           << quotedMessage << "\". Antworte als " << bot->GetName() << " in einer kurzen Chatzeile auf Deutsch.";
 
     ObjectGuid const botGuid = bot->GetGUID();
     ObjectGuid const senderGuid = sender->GetGUID();
@@ -186,11 +242,12 @@ void OllamaChatMgr::WorkerThreadMain(ObjectGuid botGuid, ObjectGuid senderGuid, 
 
     // BLOCKIEREND - siehe OllamaHttpClient.h-Kopfkommentar. Laeuft auf diesem dedizierten
     // Hintergrund-Thread, NIEMALS auf dem World-Update-Thread.
-    if (!OllamaHttpClient::PostJson(_host, _port, "/api/generate", requestJson, responseBody))
+    if (!OllamaHttpClient::PostJson(_host, _port, "/api/generate", requestJson, responseBody, _requestTimeoutSeconds))
     {
         TC_LOG_ERROR("scripts.ollamachat", "OllamaChatMgr::WorkerThreadMain: HTTP-Request an "
-            "Ollama-Server %s:%u fehlgeschlagen (nicht erreichbar?) - Antwort auf Whisper von '%s' "
-            "entfaellt.", _host.c_str(), uint32(_port), senderName.c_str());
+            "Ollama-Server %s:%u fehlgeschlagen (nicht erreichbar oder Timeout nach %u s?) - Antwort auf "
+            "Whisper von '%s' entfaellt.", _host.c_str(), uint32(_port), _requestTimeoutSeconds,
+            senderName.c_str());
         return;
     }
 
@@ -200,6 +257,14 @@ void OllamaChatMgr::WorkerThreadMain(ObjectGuid botGuid, ObjectGuid senderGuid, 
         TC_LOG_ERROR("scripts.ollamachat", "OllamaChatMgr::WorkerThreadMain: Ollama-Antwort enthielt "
             "kein auswertbares 'response'-Feld (Server-Fehler? Falsches Modell '%s' konfiguriert?) - "
             "Rohantwort (gekuerzt): %.200s", _model.c_str(), responseBody.c_str());
+        return;
+    }
+
+    replyText = SanitizeReplyText(replyText);
+    if (replyText.empty())
+    {
+        TC_LOG_ERROR("scripts.ollamachat", "OllamaChatMgr::WorkerThreadMain: Antwort war nach der "
+            "Bereinigung leer - Antwort auf Whisper von '%s' entfaellt.", senderName.c_str());
         return;
     }
 

@@ -45,6 +45,7 @@ EndScriptData */
 #include "TemporarySummon.h"
 #include "WorldSession.h"
 #include <algorithm>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <memory>
@@ -2144,10 +2145,8 @@ public:
         TC_LOG_INFO("server", "[arttest] artifact %u candidate items: %s", artifactId, list.c_str());
 
         uint32 itemId = candidates.front();
-        if (player->HasItemCount(itemId, 1))
-            return true;
-
-        if (!player->StoreNewItemInBestSlots(itemId, 1))
+        // A weapon the character already owns still gets the artifact power (otherwise the command silently does nothing)
+        if (!player->HasItemCount(itemId, 1) && !player->StoreNewItemInBestSlots(itemId, 1))
         {
             handler->PSendSysMessage("[arttest] could not store item %u for artifact %u (bags full?)", itemId, artifactId);
             return false;
@@ -2217,6 +2216,37 @@ public:
             handler->SendSysMessage("[arttest] .arttest gen | gen list | gen <name> - the trait candidates from spell_artifact_traits_gen.cpp");
             handler->SendSysMessage("[arttest] .arttest prepare | weapon [all] | all | combat | elementalist deception knight sweetsouls fatalechoes obsidianlance balancedblades glacialeruption sacreddawn cosmicripple timesandmeasures demonspeed anguish thalkielsdiscord doomwolves shatterthesouls deathandglory angling (all run on any class, class-locked ones SKIP on the wrong class)");
                         return true;
+        }
+
+        // Test tooling: ground height check of creature spawns. Reads spawn guids from height_guids.txt (one per line, server dir),
+        // writes guid,id,spawnZ,groundZ,diff to height_out.csv. Spawns of other maps than the player's are skipped.
+        if (arg == "height")
+        {
+            std::ifstream in("height_guids.txt");
+            std::ofstream out("height_out.csv", std::ios::trunc);
+            if (!in || !out)
+            {
+                handler->SendSysMessage("[arttest] height: cannot open height_guids.txt / height_out.csv");
+                return true;
+            }
+            Map* map = player->GetMap();
+            uint32 done = 0, skipped = 0;
+            uint64 guid;
+            while (in >> guid)
+            {
+                CreatureData const* data = sObjectMgr->GetCreatureData(guid);
+                if (!data || data->mapid != map->GetId())
+                {
+                    ++skipped;
+                    continue;
+                }
+                map->LoadGrid(data->posX, data->posY);
+                float ground = map->GetHeight(player->GetPhaseShift(), data->posX, data->posY, data->posZ + 2.0f, true, 20.0f);
+                out << guid << ',' << data->id << ',' << data->posZ << ',' << ground << ',' << (data->posZ - ground) << '\n';
+                ++done;
+            }
+            handler->PSendSysMessage("[arttest] height: %u checked, %u skipped (other map / unknown)", done, skipped);
+            return true;
         }
 
         if (arg == "prepare")

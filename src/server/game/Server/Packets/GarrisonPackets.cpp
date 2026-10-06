@@ -309,6 +309,40 @@ WorldPacket const* WorldPackets::Garrison::GarrisonUpgradeResult::Write()
     return &_worldPacket;
 }
 
+void WorldPackets::Garrison::GarrisonRequestResearchTalent::Read()
+{
+    _worldPacket >> TalentID;
+}
+
+WorldPacket const* WorldPackets::Garrison::GarrisonResearchTalent::Write()
+{
+    _worldPacket << Result;
+    _worldPacket << GarrTypeID;
+    _worldPacket << TalentID;
+    _worldPacket << ResearchTime;
+    _worldPacket << Flags;
+
+    return &_worldPacket;
+}
+
+void WorldPackets::Garrison::GarrisonRequestClassSpecCategoryInfo::Read()
+{
+    _worldPacket >> GarrFollowerTypeID;
+}
+
+WorldPacket const* WorldPackets::Garrison::GarrisonResponseClassSpecCategoryInfo::Write()
+{
+    _worldPacket << GarrFollowerTypeID;
+    _worldPacket << uint32(Datas.size());
+    for (FollowersClassSpecInfo const& info : Datas)
+    {
+        _worldPacket << info.Category;
+        _worldPacket << info.Option;
+    }
+
+    return &_worldPacket;
+}
+
 WorldPacket const* WorldPackets::Garrison::GarrisonRequestBlueprintAndSpecializationDataResult::Write()
 {
     _worldPacket << int32(GarrTypeID);

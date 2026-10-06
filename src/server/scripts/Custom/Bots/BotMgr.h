@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -192,6 +192,7 @@
 #include "Define.h"
 #include "ObjectGuid.h"
 #include "BotCharacter.h"
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
@@ -354,6 +355,12 @@ public:
     // wird gestartet.
     bool RequestBotLogin(uint32 accountId);
 
+    // OI-020 (03.10.2026): Autostart bereits vorhandener Bot-Accounts nach einem Serverneustart. Bot-Accounts
+    // und -Charaktere liegen in der DB, nur die (socketlose) Session ist rein im Speicher. Legt fuer einen
+    // existierenden Account bei Bedarf die Session an und loest den normalen Login aus (CharEnum -> Tick()).
+    // Schluessel in worldserver.conf: Playerbots.Autostart.Enable / .AccountIds / .PerSecond / .DelaySeconds.
+    bool RequestBotLoginExistingAccount(uint32 accountId);
+
     BotCharacterState GetBotSessionState(uint32 accountId) const;
     Player* GetBotPlayer(uint32 accountId) const;
 
@@ -375,6 +382,8 @@ public:
     // unabhaengig davon weiterhin einzeln nutzbar (rufen BotMgr-Methoden direkt auf, nicht ueber
     // Tick()).
     bool IsModuleEnabled() const { return _moduleEnabled; }
+    // Playerbots.Debug.Combat = 1: schreibt CombatDbg-/DamageDiag-Zeilen (Raid-Diagnose, kostet Log-Platz), Standard aus
+    bool IsCombatDebug() const { return _combatDebug; }
 
     // --- Runde N (27.09.2026): Fix fuer den Runde-M-Shutdown-Absturz ---------
     //
@@ -741,6 +750,52 @@ public:
     // Artefaktwaffen sind in `bot_equipment_pool` bereits beim Befuellen ausgeschlossen (ArtifactID
     // != 0 gefiltert), hier keine zusaetzliche Pruefung noetig.
     bool EquipBotFromPool(uint32 accountId);
+
+    // OI-051: bringt einen eingeloggten Bot auf die Stufe 1-110 (nur aufwaerts) mit Spezialisierung, Talenten und
+    // stufenpassender Pool-Ausruestung; specId 0 = Standard-Spezialisierung. Zusammenfassung in outSummary.
+    // role: 0 = egal, 1 = Tank, 2 = Heiler, 3 = Schaden (waehlt die erste passende Spezialisierung, wenn specId 0 ist);
+    // targetIlvl: 0 = normale Pool-Wahl, sonst nur Items >= Ziel-Itemlevel (z. B. 825 fuer den LFR).
+    bool ProvisionBot(uint32 accountId, uint8 targetLevel, uint32 specId, uint8 role, uint16 targetIlvl, std::string& outSummary);
+
+    // OI-051: teleportiert einen Bot zu einem zur Stufe/Fraktion/Klasse passenden Questgeber-Gebiet (siehe PlaceBotByLevel()).
+    bool PlaceBotByLevel(uint32 accountId, std::string& outSummary);
+
+    // OI-023: LFR mit vorgebauter Bot-Raidgruppe. HandleLfrDemand() (alle ca. 10 s aus ProcessLfgPoolFillTick) erkennt
+    // Raidfinder-Fluegel, in denen echte Spieler warten, und reiht pro (Fluegel, Fraktion) EINE vorgebaute Raidgruppe aus
+    // Bots als EINEN Warteschlangen-Eintrag ein (Rollenluecke: Fluegel-Rollenzahl minus wartende Spieler). QueueBotRaidGroup()
+    // baut die Gruppe (Rolle aus Spec, Stufe und Itemlevel-Minimum des Fluegels, gleiche Fraktion, ohne Gruppe).
+    void HandleLfrDemand();
+    // Raid-/Dungeon-Verhalten (04.10.2026): ~1 s-Tick fuer Bots in Instanzen: Wipe-Wiederbelebung, automatisches Folgen eines Spieler-Leiters,
+    // automatischer Dungeon-Clear fuer reine Bot-Gruppen. Rollenlogik (Tank-Aggro, Positionierung, Heiler-Rezz) steckt in ProcessBotCombatAI().
+    void ProcessBotGroupInstance(uint32 accountId, uint32 diff);
+
+    // --- Gruppenfuehrung im Dungeon/Raid (Steuerung per "!dc lead <Bot>", "!dc mode <...>" bzw. Addon AshDC_DungeonClear) ---
+    // Pull-Modi des fuehrenden Bot-Tanks: 0 normal (naechster Gegner einzeln), 1 pack (ganzen Pack pullen, vorher sammeln/Heiler-Mana),
+    // 2 leeroy (ohne Warten direkt zum Boss, Gegner werden mitgezogen), 3 combo (Pack-Pull bei >= 3 Gegnern, sonst normal; vor dem Boss sammeln).
+    // Antwort-Text beginnt mit "[AshDC]".
+    std::string SetGroupLead(Player* requester, std::string const& botName);
+    std::string SetGroupMode(Player* requester, std::string const& modeName);
+    std::string GroupLeadStatus(Player* requester);
+    // aus dem Dungeon-Clear: alle Bot-Mitglieder (ausser dem Tank) in `radius` um den Tank, Heiler-Mana >= 50 %?
+    bool IsGroupGathered(Player* leadTank, float radius) const;
+    struct GroupBotConfig
+    {
+        ObjectGuid Lead;      // gewaehlter fuehrender Bot-Tank (leer = erster lebender Bot-Tank)
+        uint8 Mode = 0;       // siehe oben
+        int8 Enabled = -1;    // -1 automatisch (reine Bot-Gruppe: an, echter Spieler dabei: aus bis "lead"/"!dc on"), 0 aus, 1 an
+    };
+    std::map<ObjectGuid, GroupBotConfig> _groupCfg;
+    Player* ResolveLeadTank(Group* group, GroupBotConfig const* cfg) const;
+    Unit* SelectBotTankTarget(Player* bot) const;
+    // ".summon" ohne Argument (und ohne Zielauswahl): teleportiert alle Bots der Gruppe des Spielers verteilt zu ihm. Rueckgabe: Anzahl Bots in der Gruppe.
+    uint32 SummonGroupBots(Player* me, uint32& moved);
+    // Loggt bei Bedarf offline gehaltene Raid-Pool-Bots (Konten mit Praefix LFRBOT) einer Fraktion ein (gestaffelt, hoechstens `maxLogins` pro Aufruf).
+    // Rueckgabe: Anzahl neu angestossener Logins. Die Konten-Liste wird beim ersten Aufruf aus der DB geladen.
+    uint32 EnsureLfrPoolOnline(uint32 teamId, uint32 maxLogins);
+    bool QueueBotRaidGroup(uint32 dungeonId, uint32 teamId, uint8 realTanks, uint8 realHealers, uint8 realDamage, std::string& outSummary);
+    // Test ohne Client: ein eingeloggter Bot meldet sich als "echter Spieler" fuer einen LFR-Fluegel an (roleMask = PLAYER_ROLE_*).
+    bool TestQueueBotAsRealPlayer(uint32 accountId, uint32 dungeonId, uint8 roleMask, std::string& outSummary);
+    std::string LfrStatus() const;
 
     // --- Runde 137 (28.09.2026): Gruppen-Beitritt + Folgen-KI nach Design lcf2r136 ----------------
     //
@@ -1189,6 +1244,16 @@ private:
     // Konfigurationsschluessel (alte worldserver.conf ohne 'Playerbots.Enable') sich exakt wie vor
     // dieser Runde verhaelt (kein stilles Abschalten durch Config-Drift).
     bool _moduleEnabled = true;
+    bool _combatDebug = false;
+
+    // --- OI-020: Autostart (siehe RequestBotLoginExistingAccount()) ---
+    bool _autostartQueued = false;          // Warteschlange nur EINMAL pro Prozess fuellen (nicht bei .reload config)
+    std::vector<uint32> _autostartQueue;    // noch einzuloggende Account-Ids (Vorderseite zuerst)
+    size_t _autostartNext = 0;
+    uint32 _autostartPerSecond = 2;
+    uint32 _autostartDelayMs = 15000;       // Wartezeit nach Serverstart, bevor der erste Login ausgeloest wird
+    uint32 _autostartAccumMs = 0;
+    uint32 _autostartStartedLogins = 0;
 
     // Runde B: eine socketlose WorldSession pro Bot-Account, NIE ueber
     // World::AddSession() registriert (Minimal-Footprint-Entscheidung Runde A).
@@ -1225,6 +1290,13 @@ private:
         // (~1s statt ~400ms), da Routing-Entscheidungen weniger zeitkritisch sind als Rotationsschritte.
         bool DungeonClearActive = false;
         uint32 DungeonClearTickAccumMs = 0;
+
+        // Raid-Verhalten (ProcessBotGroupInstance): eigener ~1s-Akkumulator, Zeit seit dem Tod, Dungeon-Clear automatisch gestartet
+        uint32 GroupTickAccumMs = 0;
+        uint32 DeadMs = 0;
+        bool DungeonClearAuto = false;
+        uint32 PositionMoveCooldownMs = 0;
+        uint32 GatherWaitMs = 0; // wie lange der fuehrende Tank schon aufs Sammeln der Gruppe wartet (Abbruch nach 30 s)
     };
     std::unordered_map<uint32, BotSessionEntry> _botSessions;
 
@@ -1235,6 +1307,20 @@ private:
     // Dungeon-Gruppe uebernommen wurde (LFG_STATE_DUNGEON) oder die Queue ohne Match wieder verlassen
     // hat (LFG_STATE_NONE, z.B. Proposal abgelehnt/Timeout) - siehe AdvanceLfgFillerBots().
     std::unordered_set<uint32> _lfgFillerBotAccountIds;
+    // OI-023: vorgebaute LFR-Bot-Raidgruppen (verfolgt, bis ein Match entsteht oder der wartende Spieler weg ist)
+    struct LfrBotGroup
+    {
+        uint32 QueueId = 0;
+        uint32 Team = 0;
+        ObjectGuid GroupGuid;
+        time_t Created = 0;
+        std::vector<uint32> Accounts;
+    };
+    std::vector<LfrBotGroup> _lfrBotGroups;
+    std::unordered_set<uint32> _lfgTestRealAccounts;   // Test: diese Bot-Konten gelten fuer den Fueller als "echter Spieler"
+    std::vector<uint32> _lfrPoolAccounts[2];            // Raid-Pool-Konten je Fraktion (0 Allianz, 1 Horde)
+    bool _lfrPoolLoaded = false;
+    std::unordered_map<uint64, time_t> _lfrFailUntil;  // Abkuehlzeit je (Fluegel, Fraktion) nach fehlgeschlagenem Gruppenaufbau
 
     // Akkumulator fuer den Lazy-Nachfuell-Timer (siehe ProcessLfgPoolFillTick()/
     // LFG_POOL_FILL_INTERVAL_MS) - dieselbe Diff-Aufsummierungs-Konvention wie IdleTickAccumMs oben,
@@ -1246,3 +1332,4 @@ private:
 #define sBotMgr BotMgr::instance()
 
 #endif // BOT_MGR_H
+

@@ -90,18 +90,17 @@ struct boss_nythendra : public BossAI
 
     void ScheduleTasks() override
     {
-        events.ScheduleEvent(SPELL_ROT,             10s,    EVENTS_PHASE_1);
-        events.ScheduleEvent(SPELL_VOLATILE_ROT,    30s,    EVENTS_PHASE_1);
-        events.ScheduleEvent(SPELL_INFESTED_BREATH, 60s,    EVENTS_PHASE_1);
-        events.ScheduleEvent(SPELL_TAIL_LASH,       20s,    EVENTS_PHASE_1);
+        // Timer laut DBM/BigWigs/LC (Playbook-Recherche 05.10.2026, BOSS_PLAYBOOK_EN.md Abschnitt 4): Rot 6 s/16 s, Volatile Rot 24 s/24 s,
+        // Infested Breath 37 s/37 s. Tail Lash (203024) kommt in keiner der Quellen vor (nur in diesem Skript) und wurde entfernt.
+        events.ScheduleEvent(SPELL_ROT,             6s,     EVENTS_PHASE_1);
+        events.ScheduleEvent(SPELL_VOLATILE_ROT,    24s,    EVENTS_PHASE_1);
+        events.ScheduleEvent(SPELL_INFESTED_BREATH, 37s,    EVENTS_PHASE_1);
 
-        if (IsHeroic())
+        // Berserk: 10 min in LFR/Normal, 8 min ab Heroic
+        me->GetScheduler().Schedule(IsHeroic() ? 8min : 10min, [this](TaskContext /*context*/)
         {
-            me->GetScheduler().Schedule(8min, [this](TaskContext /*context*/)
-            {
-                me->CastSpell(me, SPELL_ENRAGE, true);
-            });
-        }
+            me->CastSpell(me, SPELL_ENRAGE, true);
+        });
     }
 
     void JustDied(Unit* /*killer*/) override
@@ -146,11 +145,16 @@ struct boss_nythendra : public BossAI
         {
             case SPELL_ROT:
             {
-                for (uint8 i = 0; i < 2; ++i)
-                    if (Unit* target = SelectTarget(SELECT_TARGET_RANDOM, 2))
+                // Zielzahl nach Raidgroesse (LC): < 15 Spieler 1, 15-24 2, ab 25 3; der Tank (Top-Aggro) wird ausgenommen
+                uint32 const players = me->GetMap()->GetPlayersCountExceptGMs();
+                uint8 const count = players >= 25 ? 3 : (players >= 15 ? 2 : 1);
+                std::list<Unit*> targets;
+                SelectTargetList(targets, count, SELECT_TARGET_RANDOM, 100.0f, true, -SPELL_ROT);
+                for (Unit* target : targets)
+                    if (target != me->GetVictim())
                         me->CastSpell(target, SPELL_ROT, true);
 
-                events.Repeat(10s);
+                events.Repeat(16s);
                 break;
             }
             case SPELL_VOLATILE_ROT:
@@ -158,13 +162,13 @@ struct boss_nythendra : public BossAI
                 if (Unit* target = SelectTarget(SELECT_TARGET_TOPAGGRO))
                     me->CastSpell(target, SPELL_VOLATILE_ROT, true);
 
-                events.Repeat(25s);
+                events.Repeat(24s);
                 break;
             }
             case SPELL_INFESTED_BREATH:
             {
                 me->CastSpell(nullptr, SPELL_INFESTED_BREATH, false);
-                events.Repeat(60s);
+                events.Repeat(37s);
 
                 me->ModifyPower(POWER_ENERGY, -50);
 

@@ -44,6 +44,7 @@ EndScriptData */
 #include "ScriptMgr.h"
 #include "Player.h"
 #include "BotMgr.h"
+#include "BotPopulationMgr.h"
 
 class bot_playerscript_hooks : public PlayerScript
 {
@@ -76,6 +77,7 @@ class bot_worldscript_tick : public WorldScript
         void OnConfigLoad(bool /*reload*/) override
         {
             sBotMgr->LoadConfig();
+            sBotPop->LoadConfig();
         }
 
         void OnUpdate(uint32 diff) override
@@ -83,6 +85,7 @@ class bot_worldscript_tick : public WorldScript
             if (!sBotMgr->IsModuleEnabled())
                 return; // Playerbots.Enable=0 - Heartbeat komplett pausiert, siehe BotMgr.h-Kommentar
             sBotMgr->Tick(diff);
+            sBotPop->Update(diff);
         }
 
         // Runde N (27.09.2026): siehe Kopfkommentar oben / BotMgr::LogoutAllBots() -
@@ -95,8 +98,64 @@ class bot_worldscript_tick : public WorldScript
         }
 };
 
+// OI-023 Diagnose (05.10.2026): wer verursacht den Schaden an Bots auf Raidkarten? Summiert je (Angreifer-Entry, Zauber) den Schaden
+// an Spieler-Bots und schreibt alle 10 s die fuenf groessten Quellen ins Log; Tode werden einzeln mit Killer protokolliert.
+#include "Creature.h"
+#include "SpellInfo.h"
+#include "Map.h"
+#include "Log.h"
+#include "Timer.h"
+#include <map>
+#include <mutex>
+#include <vector>
+#include <algorithm>
+
+class bot_raid_damage_diag : public UnitScript, public PlayerScript
+{
+    public:
+        bot_raid_damage_diag() : UnitScript("bot_raid_damage_diag"), PlayerScript("bot_raid_damage_diag_deaths") { }
+
+        void OnDamage(Unit* attacker, Unit* victim, uint32& damage, SpellInfo const* spell) override
+        {
+            if (!sBotMgr->IsCombatDebug() || !attacker || !victim || victim->GetTypeId() != TYPEID_PLAYER || !sBotMgr->IsBotPlayerGuid(victim->GetGUID()))
+                return;
+            Map* map = victim->GetMap();
+            if (!map || !map->IsRaid() || attacker->GetTypeId() == TYPEID_PLAYER)
+                return;
+            std::lock_guard<std::mutex> lock(_mutex);
+            Source& s = _sources[{ attacker->GetEntry(), spell ? spell->Id : 0u }];
+            s.Total += damage;
+            ++s.Hits;
+            s.Max = std::max(s.Max, damage);
+            s.MaxHealth = std::max<uint32>(s.MaxHealth, uint32(victim->GetMaxHealth()));
+            uint32 const now = getMSTime();
+            if (now - _lastLog < 10000)
+                return;
+            _lastLog = now;
+            std::vector<std::pair<std::pair<uint32, uint32>, Source>> v(_sources.begin(), _sources.end());
+            std::sort(v.begin(), v.end(), [](auto const& a, auto const& b) { return a.second.Total > b.second.Total; });
+            for (size_t i = 0; i < v.size() && i < 5; ++i)
+                TC_LOG_INFO("scripts.bots", "BotMgr::DamageDiag: Quelle Entry %u Zauber %u: %u Treffer, Summe %u, max %u (Bot-MaxHP bis %u).",
+                    v[i].first.first, v[i].first.second, v[i].second.Hits, v[i].second.Total, v[i].second.Max, v[i].second.MaxHealth);
+            _sources.clear();
+        }
+
+        void OnPlayerKilledByCreature(Creature* killer, Player* killed) override
+        {
+            if (sBotMgr->IsCombatDebug() && killer && killed && sBotMgr->IsBotPlayerGuid(killed->GetGUID()) && killed->GetMap() && killed->GetMap()->IsRaid())
+                TC_LOG_INFO("scripts.bots", "BotMgr::DamageDiag: Bot %s von '%s' (Entry %u) getoetet (HP-Max %u).", killed->GetName().c_str(), killer->GetName().c_str(), killer->GetEntry(), uint32(killed->GetMaxHealth()));
+        }
+
+    private:
+        struct Source { uint64 Total = 0; uint32 Hits = 0, Max = 0, MaxHealth = 0; };
+        std::mutex _mutex;
+        std::map<std::pair<uint32, uint32>, Source> _sources;
+        uint32 _lastLog = 0;
+};
+
 void AddSC_bot_playerscript_hooks()
 {
+    new bot_raid_damage_diag();
     new bot_playerscript_hooks();
     new bot_worldscript_tick();
 }

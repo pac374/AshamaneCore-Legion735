@@ -345,6 +345,12 @@ void Garrison::DeleteFromDB(CharacterDatabaseTransaction& trans, ObjectGuid::Low
     stmt->setUInt64(0, guid);
     stmt->setUInt8(1, garrType);
     trans->Append(stmt);
+
+    // OI-030: Ordenshallen-Talente (nur Class Hall; garrison_type wie bei den uebrigen Tabellen)
+    stmt = CharacterDatabase.GetPreparedStatement(CHAR_DEL_CHARACTER_GARRISON_TALENTS);
+    stmt->setUInt64(0, guid);
+    stmt->setUInt8(1, garrType);
+    trans->Append(stmt);
 }
 
 void Garrison::Enter()

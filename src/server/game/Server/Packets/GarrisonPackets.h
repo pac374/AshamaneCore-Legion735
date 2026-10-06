@@ -314,6 +314,58 @@ namespace WorldPackets
             WorldPacket const* Write() override;
         };
 
+        // OI-030 / A3: Ordenshallen-Talente (Wire-Format wie in der Referenzquelle)
+        class GarrisonRequestResearchTalent final : public ClientPacket
+        {
+        public:
+            GarrisonRequestResearchTalent(WorldPacket&& packet) : ClientPacket(CMSG_GARRISON_RESEARCH_TALENT, std::move(packet)) { }
+
+            void Read() override;
+
+            uint32 TalentID = 0;
+        };
+
+        class GarrisonResearchTalent final : public ServerPacket
+        {
+        public:
+            GarrisonResearchTalent() : ServerPacket(SMSG_GARRISON_RESEARCH_TALENT, 20) { }
+
+            WorldPacket const* Write() override;
+
+            int32 Result = 0;
+            uint32 GarrTypeID = 0;
+            uint32 TalentID = 0;
+            uint32 ResearchTime = 0;
+            uint32 Flags = 0;
+        };
+
+        struct FollowersClassSpecInfo
+        {
+            uint32 Category = 0;
+            uint32 Option = 0;
+        };
+
+        class GarrisonRequestClassSpecCategoryInfo final : public ClientPacket
+        {
+        public:
+            GarrisonRequestClassSpecCategoryInfo(WorldPacket&& packet) : ClientPacket(CMSG_GARRISON_REQUEST_CLASS_SPEC_CATEGORY_INFO, std::move(packet)) { }
+
+            void Read() override;
+
+            int32 GarrFollowerTypeID = 0;
+        };
+
+        class GarrisonResponseClassSpecCategoryInfo final : public ServerPacket
+        {
+        public:
+            GarrisonResponseClassSpecCategoryInfo() : ServerPacket(SMSG_GARRISON_RESPONSE_CLASS_SPEC_CATEGORY_INFO, 4 + 4) { }
+
+            WorldPacket const* Write() override;
+
+            int32 GarrFollowerTypeID = 0;
+            std::vector<FollowersClassSpecInfo> Datas;
+        };
+
         class GarrisonRequestBlueprintAndSpecializationDataResult final : public ServerPacket
         {
         public:

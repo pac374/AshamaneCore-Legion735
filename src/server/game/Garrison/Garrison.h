@@ -64,7 +64,7 @@ public:
     static void DeleteFromDB(CharacterDatabaseTransaction& trans, ObjectGuid::LowType guid, GarrisonType garrType);
 
     virtual bool Create(uint32 garrSiteId);
-    void Update(uint32 const diff);
+    virtual void Update(uint32 const diff);
     virtual void Delete();
 
     virtual void Enter();

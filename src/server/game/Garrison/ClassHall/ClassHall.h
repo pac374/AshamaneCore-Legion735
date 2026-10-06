@@ -25,6 +25,14 @@
 class GameObject;
 class Map;
 
+// Flags eines Ordenshallen-Talents (Feld "Flags" im Wire-Format GarrisonTalent / in der Tabelle character_garrison_talents)
+enum ClassHallTalentFlags : int32
+{
+    CLASS_HALL_TALENT_IN_RESEARCH = 0,
+    CLASS_HALL_TALENT_READY       = 1,
+    CLASS_HALL_TALENT_CHANGE      = 2
+};
+
 class TC_GAME_API ClassHall : public Garrison
 {
 public:
@@ -33,11 +41,28 @@ public:
 
     bool LoadFromDB() override;
     void SaveToDB(CharacterDatabaseTransaction& trans) override;
+    void Update(uint32 const diff) override;
+    void Enter() override;
 
     bool Create(uint32 garrSiteId) override;
     void Delete() override;
 
     bool IsAllowedArea(AreaTableEntry const* area) const override;
+
+    // --- Talente (OI-030) ---
+    std::vector<WorldPackets::Garrison::GarrisonTalent> const& GetTalents() const { return _talents; }
+    // CMSG_GARRISON_RESEARCH_TALENT: prueft, zieht Kosten ab, startet die Forschung (oder den Wechsel, wenn dieselbe Tier-Stufe schon belegt ist)
+    void ResearchTalent(uint32 talentId);
+    // true, wenn das Talent erforscht und fertig ist
+    bool HasTalent(uint32 talentId) const;
+
+private:
+    void SendResearchResult(int32 result, uint32 talentId, uint32 researchTime, uint32 flags) const;
+    void FinishTalent(WorldPackets::Garrison::GarrisonTalent& talent);
+    void ApplyTalentPerks() const;
+
+    std::vector<WorldPackets::Garrison::GarrisonTalent> _talents;
+    uint32 _talentUpdateAccumMs = 0;
 };
 
 #endif // ClassHall_h__

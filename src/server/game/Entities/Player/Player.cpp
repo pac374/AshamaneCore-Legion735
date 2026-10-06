@@ -29084,6 +29084,10 @@ void Player::SendGarrisonInfo() const
         for (auto const& p : garrison.second->GetFollowers())
             garrisonInfo.Followers.push_back(&p.second.PacketInfo);
 
+        // OI-030: erforschte / laufende Ordenshallen-Talente
+        if (ClassHall const* classHall = garrison.second->ToClassHall())
+            garrisonInfo.Talents = classHall->GetTalents();
+
         for (auto const& p : garrison.second->GetMissions())
         {
             garrisonInfo.Missions.push_back(&p.second.PacketInfo);
@@ -29904,6 +29908,47 @@ bool Player::ValidateAppearance(uint8 race, uint8 class_, uint8 gender, uint8 ha
         return false;
 
     return true;
+}
+
+// OI-051: sucht die erste gueltige Kombination aus Haut/Gesicht/Frisur/Haarfarbe/Bart/Zusatzmerkmalen fuer
+// Volk, Klasse und Geschlecht (z. B. Todesritter/Daemonenjaeger verlangen klassenspezifische Merkmale, mit
+// 0/0/0 lehnt der Server die Anlage ab). Fuer die Bot-Charakteranlage; Spieler waehlen im Client selbst.
+bool Player::FindValidAppearance(uint8 race, uint8 class_, uint8 gender, uint8& skin, uint8& face, uint8& hairStyle,
+    uint8& hairColor, uint8& facialHair, std::array<uint8, PLAYER_CUSTOM_DISPLAY_SIZE>& customDisplay)
+{
+    bool found = false;
+    for (uint8 s = 0; s < 60 && !found; ++s)
+        if (IsSectionValid(race, class_, gender, CharBaseSectionVariation::Skin, 0, s, true)) { skin = s; found = true; }
+    if (!found)
+        return false;
+
+    found = false;
+    for (uint8 f = 0; f < 60 && !found; ++f)
+        if (IsSectionValid(race, class_, gender, CharBaseSectionVariation::Face, f, skin, true)) { face = f; found = true; }
+    if (!found)
+        return false;
+
+    found = false;
+    for (uint8 h = 0; h < 80 && !found; ++h)
+        for (uint8 c = 0; c < 60 && !found; ++c)
+            if (IsSectionValid(race, class_, gender, CharBaseSectionVariation::Hair, h, c, true)) { hairStyle = h; hairColor = c; found = true; }
+    if (!found)
+        return false;
+
+    facialHair = 0;
+    for (uint8 b = 0; b < 40; ++b)
+        if (IsSectionValid(race, class_, gender, CharBaseSectionVariation::FacialHair, b, hairColor, true)) { facialHair = b; break; }
+
+    CharBaseSectionVariation const customVariations[PLAYER_CUSTOM_DISPLAY_SIZE] =
+        { CharBaseSectionVariation::CustomDisplay1, CharBaseSectionVariation::CustomDisplay2, CharBaseSectionVariation::CustomDisplay3 };
+    for (uint32 i = 0; i < PLAYER_CUSTOM_DISPLAY_SIZE; ++i)
+    {
+        customDisplay[i] = 0;
+        for (uint8 v = 0; v < 60; ++v)
+            if (IsSectionValid(race, class_, gender, customVariations[i], v, 0, true)) { customDisplay[i] = v; break; }
+    }
+
+    return ValidateAppearance(race, class_, gender, hairStyle, hairColor, face, facialHair, skin, customDisplay, true);
 }
 
 uint32 Player::GetDefaultSpecId() const

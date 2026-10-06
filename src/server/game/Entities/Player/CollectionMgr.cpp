@@ -115,6 +115,9 @@ void CollectionMgr::LoadAccountToys(PreparedQueryResult result)
 
 void CollectionMgr::SaveAccountToys(LoginDatabaseTransaction& trans)
 {
+    if (!_owner->GetBattlenetAccountId())
+        return;
+
     LoginDatabasePreparedStatement* stmt = nullptr;
     for (auto const& toy : _toys)
     {
@@ -178,6 +181,9 @@ void CollectionMgr::LoadAccountHeirlooms(PreparedQueryResult result)
 
 void CollectionMgr::SaveAccountHeirlooms(LoginDatabaseTransaction& trans)
 {
+    if (!_owner->GetBattlenetAccountId())
+        return;
+
     LoginDatabasePreparedStatement* stmt = nullptr;
     for (auto const& heirloom : _heirlooms)
     {
@@ -370,6 +376,9 @@ void CollectionMgr::LoadAccountMounts(PreparedQueryResult result)
 
 void CollectionMgr::SaveAccountMounts(LoginDatabaseTransaction& trans)
 {
+    if (!_owner->GetBattlenetAccountId())
+        return;
+
     for (auto const& mount : _mounts)
     {
         LoginDatabasePreparedStatement* stmt = LoginDatabase.GetPreparedStatement(LOGIN_REP_ACCOUNT_MOUNTS);
@@ -532,6 +541,11 @@ void CollectionMgr::LoadAccountItemAppearances(PreparedQueryResult knownAppearan
 
 void CollectionMgr::SaveAccountItemAppearances(LoginDatabaseTransaction& trans)
 {
+    // Accounts without a Battle.net account (playerbot accounts) have no row to reference: the insert violates
+    // fk_battlenet_item_appearances (errno 1452) and floods DBErrors.log
+    if (!_owner->GetBattlenetAccountId())
+        return;
+
     uint16 blockIndex = 0;
     boost::to_block_range(*_appearances, DynamicBitsetBlockOutputIterator([this, &blockIndex, trans](uint32 blockValue)
     {

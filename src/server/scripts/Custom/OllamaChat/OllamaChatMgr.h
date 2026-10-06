@@ -112,6 +112,8 @@ private:
     // Maximale gleichzeitig laufende Hintergrund-Threads (Sicherheitsnetz gegen einen Spam-Whisperer,
     // der beliebig viele parallele Ollama-Requests ausloest) - siehe RequestBotReply()-Implementierung.
     uint32 _maxConcurrentRequests = 4;
+    // Gesamtfrist je Ollama-Anfrage in Sekunden (OllamaChat.TimeoutSeconds), siehe OllamaHttpClient::PostJson().
+    uint32 _requestTimeoutSeconds = 30;
 
     mutable std::mutex _queueMutex;
     std::queue<PendingReply> _pendingReplies;

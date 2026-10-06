@@ -1986,6 +1986,56 @@ struct GarrSiteLevelPlotInstLoadInfo
     }
 };
 
+struct GarrTalentLoadInfo
+{
+    static DB2LoadInfo const* Instance()
+    {
+        static DB2FieldMeta const fields[] =
+        {
+            { false, FT_STRING, "Name" },
+            { false, FT_STRING, "Description" },
+            { true, FT_INT, "IconFileDataID" },
+            { true, FT_INT, "ResearchDurationSecs" },
+            { false, FT_BYTE, "Tier" },
+            { false, FT_BYTE, "UiOrder" },
+            { false, FT_BYTE, "Flags" },
+            { false, FT_INT, "ID" },
+            { true, FT_INT, "GarrTalentTreeID" },
+            { true, FT_INT, "GarrAbilityID" },
+            { true, FT_INT, "PlayerConditionID" },
+            { true, FT_INT, "ResearchCost" },
+            { true, FT_INT, "ResearchCostCurrencyTypesID" },
+            { true, FT_INT, "ResearchGoldCost" },
+            { true, FT_INT, "PerkSpellID" },
+            { true, FT_INT, "PerkPlayerConditionID" },
+            { true, FT_INT, "RespecCost" },
+            { true, FT_INT, "RespecCostCurrencyTypesID" },
+            { true, FT_INT, "RespecDurationSecs" },
+            { true, FT_INT, "RespecGoldCost" },
+        };
+        static DB2LoadInfo const loadInfo(&fields[0], std::extent<decltype(fields)>::value, GarrTalentMeta::Instance(), HOTFIX_SEL_GARR_TALENT);
+        return &loadInfo;
+    }
+};
+
+struct GarrTalentTreeLoadInfo
+{
+    static DB2LoadInfo const* Instance()
+    {
+        static DB2FieldMeta const fields[] =
+        {
+            { false, FT_INT, "ID" },
+            { false, FT_SHORT, "UiTextureKitID" },
+            { false, FT_BYTE, "MaxTiers" },
+            { false, FT_BYTE, "UiOrder" },
+            { true, FT_INT, "ClassID" },
+            { true, FT_INT, "GarrTypeID" },
+        };
+        static DB2LoadInfo const loadInfo(&fields[0], std::extent<decltype(fields)>::value, GarrTalentTreeMeta::Instance(), HOTFIX_SEL_GARR_TALENT_TREE);
+        return &loadInfo;
+    }
+};
+
 struct GemPropertiesLoadInfo
 {
     static DB2LoadInfo const* Instance()

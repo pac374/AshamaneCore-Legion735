@@ -16,6 +16,7 @@
  */
 
 #include "AccountMgr.h"
+#include "../Custom/Bots/BotMgr.h"
 #include "CellImpl.h"
 #include "Chat.h"
 #include "DatabaseEnv.h"
@@ -506,6 +507,15 @@ public:
     // Summon Player
     static bool HandleSummonCommand(ChatHandler* handler, char const* args)
     {
+        // ".summon" ohne Name und ohne Zielauswahl: alle Bots der eigenen Gruppe zu mir holen (Playerbots)
+        if ((!args || !*args) && !handler->getSelectedPlayer() && handler->GetSession() && handler->GetSession()->GetPlayer()->GetGroup())
+        {
+            uint32 moved = 0;
+            uint32 total = sBotMgr->SummonGroupBots(handler->GetSession()->GetPlayer(), moved);
+            handler->PSendSysMessage("%u von %u Gruppen-Bots zu dir teleportiert.", moved, total);
+            return true;
+        }
+
         Player* target;
         ObjectGuid targetGuid;
         std::string targetName;

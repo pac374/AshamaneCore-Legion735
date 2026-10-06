@@ -185,10 +185,14 @@ void Player::UpdateSpellDamageAndHealingBonus()
         SetStatInt32Value(PLAYER_FIELD_MOD_DAMAGE_DONE_POS + i, SpellBaseDamageBonusDone(SpellSchoolMask(1 << i)) - GetInt32Value(PLAYER_FIELD_MOD_DAMAGE_DONE_NEG + i));
     }
 
-    if (HasAuraType(SPELL_AURA_OVERRIDE_ATTACK_POWER_BY_SP_PCT))
+    // Reentrancy guard: AP-from-SP and SP-from-AP auras on the same player call these two functions into each other forever (stack overflow)
+    static thread_local bool updatingAttackPowerFromSpellPower = false;
+    if (HasAuraType(SPELL_AURA_OVERRIDE_ATTACK_POWER_BY_SP_PCT) && !updatingAttackPowerFromSpellPower)
     {
+        updatingAttackPowerFromSpellPower = true;
         UpdateAttackPowerAndDamage();
         UpdateAttackPowerAndDamage(true);
+        updatingAttackPowerFromSpellPower = false;
     }
 
     if (Pet* pet = GetPet())

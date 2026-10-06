@@ -945,10 +945,11 @@ uint32 Unit::DealDamage(Unit* victim, uint32 damage, CleanDamage const* cleanDam
             victim->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_DIRECT_DAMAGE, spellProto ? spellProto->Id : 0);
             victim->UpdateLastDamagedTime(spellProto);
             victim->SaveDamageHistory(damage);
+        }
 
+        // (fixed brace placement: periodic damage on a creature used to fall into the player branch below and crash on ToPlayer() == nullptr)
         if (victim->GetTypeId() != TYPEID_PLAYER)
             victim->AddThreat(this, float(damage), damageSchoolMask, spellProto);
-        }
         else // victim is a player
         {
             // random durability for items (HIT TAKEN)

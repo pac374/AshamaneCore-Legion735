@@ -1350,6 +1350,42 @@ struct GarrSiteLevelPlotInstEntry
     uint8 UiMarkerSize;
 };
 
+// OI-030 / A1 (03.10.2026): Ordenshallen-Talente. Feldreihenfolge = Reihenfolge in GarrTalent.db2 (ID steht
+// an Index 7, siehe GarrTalentMeta in DB2Metadata.h).
+struct GarrTalentEntry
+{
+    LocalizedString* Name;
+    LocalizedString* Description;
+    int32 IconFileDataID;
+    int32 ResearchDurationSecs;
+    uint8 Tier;
+    uint8 UiOrder;
+    uint8 Flags;
+    uint32 ID;
+    int32 GarrTalentTreeID;
+    int32 GarrAbilityID;
+    int32 PlayerConditionID;
+    int32 ResearchCost;
+    int32 ResearchCostCurrencyTypesID;
+    int32 ResearchGoldCost;
+    int32 PerkSpellID;
+    int32 PerkPlayerConditionID;
+    int32 RespecCost;
+    int32 RespecCostCurrencyTypesID;
+    int32 RespecDurationSecs;
+    int32 RespecGoldCost;
+};
+
+struct GarrTalentTreeEntry
+{
+    uint32 ID;
+    uint16 UiTextureKitID;
+    uint8 MaxTiers;
+    uint8 UiOrder;
+    int32 ClassID;
+    int32 GarrTypeID;
+};
+
 struct GemPropertiesEntry
 {
     uint32 ID;

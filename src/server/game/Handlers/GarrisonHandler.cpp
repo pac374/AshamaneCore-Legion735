@@ -21,12 +21,30 @@
 #include "GarrisonAI.h"
 #include "GarrisonMgr.h"
 #include "GarrisonPackets.h"
+#include "GossipDef.h"
 #include "ObjectMgr.h"
 #include "Player.h"
 
 void WorldSession::HandleGetGarrisonInfo(WorldPackets::Garrison::GetGarrisonInfo& /*getGarrisonInfo*/)
 {
     _player->SendGarrisonInfo();
+}
+
+void WorldSession::HandleGarrisonResearchTalent(WorldPackets::Garrison::GarrisonRequestResearchTalent& garrisonRequestResearchTalent)
+{
+    if (Garrison* garrison = _player->GetGarrison(GARRISON_TYPE_CLASS_HALL))
+        if (ClassHall* classHall = garrison->ToClassHall())
+            classHall->ResearchTalent(garrisonRequestResearchTalent.TalentID);
+
+    _player->PlayerTalkClass->SendCloseGossip();
+}
+
+void WorldSession::HandleGarrisonRequestClassSpecCategoryInfo(WorldPackets::Garrison::GarrisonRequestClassSpecCategoryInfo& garrisonRequestClassSpecCategoryInfo)
+{
+    // Wie in der Referenzquelle: leere Liste (keine Spezialisierungs-Kategorien fuer Champions in dieser Ausbaustufe).
+    WorldPackets::Garrison::GarrisonResponseClassSpecCategoryInfo response;
+    response.GarrFollowerTypeID = garrisonRequestClassSpecCategoryInfo.GarrFollowerTypeID;
+    SendPacket(response.Write());
 }
 
 void WorldSession::HandleGarrisonPurchaseBuilding(WorldPackets::Garrison::GarrisonPurchaseBuilding& garrisonPurchaseBuilding)

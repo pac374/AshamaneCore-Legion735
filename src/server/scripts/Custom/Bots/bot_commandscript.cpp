@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2008-2018 TrinityCore <https://www.trinitycore.org/>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -30,12 +30,15 @@ EndScriptData */
 #include "ScriptMgr.h"
 #include "Chat.h"
 #include "BotMgr.h"
+#include "BotPopulationMgr.h"
 #include "SharedDefines.h"
 #include "Player.h"
 #include "RBAC.h"
 #include "ObjectAccessor.h"
 #include "WorldSession.h"
 #include "LFGMgr.h"
+#include "Group.h"
+#include <cmath>
 #include <sstream>
 
 class bot_commandscript : public CommandScript
@@ -77,6 +80,15 @@ public:
             { "status",        rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestStatus,        "" },
             { "findnpc",       rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestFindNpc,       "" },
             { "diagspells",    rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestDiagSpells,    "" },
+            { "provision",     rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestProvision,     "" },
+            { "place",         rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestPlace,         "" },
+            { "factory",       rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestFactory,       "" },
+            { "pop",           rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestPop,           "" },
+            { "popselftest",   rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestPopSelfTest,   "" },
+            { "raidpool",      rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestRaidPool,      "" },
+            { "lfrtest",       rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestLfrTest,       "" },
+            { "summon",        rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, false, &HandleBotTestSummon,       "" },
+            { "lfrstatus",     rbac::RBAC_PERM_COMMAND_ACCOUNT_CREATE, true, &HandleBotTestLfrStatus,     "" },
         };
         static std::vector<ChatCommand> commandTable =
         {
@@ -169,7 +181,9 @@ public:
             return false;
         }
 
-        bool ok = sBotMgr->RequestBotLogin(accountId);
+        // Seit OI-020: legt bei Bedarf die Session fuer einen bereits existierenden Bot-Account an (nach einem
+        // Serverneustart sind die Sessions weg, Account und Charakter liegen aber in der DB).
+        bool ok = sBotMgr->RequestBotLoginExistingAccount(accountId);
         handler->PSendSysMessage("[bottest] login(account %u): %s - Ergebnis ist ASYNCHRON, "
             "mit '.bottest status %u' und Server.log/DBErrors.log pruefen, mehrere Minuten laufen lassen.",
             accountId, ok ? "ausgeloest" : "FEHLER (siehe Server.log)", accountId);
@@ -578,11 +592,178 @@ public:
     }
 
     // .bottest equipfrompool <accountId>
-    // Runde 135 (28.09.2026): rüstet einen Bot VOLLSTAENDIG aus dem neuen Equipment-Pool aus (Design
+    // Runde 135 (28.09.2026): rÃ¼stet einen Bot VOLLSTAENDIG aus dem neuen Equipment-Pool aus (Design
     // lcf2r134, Implementierung siehe BotMgr::EquipBotFromPool()) - wuerfelt/liest die dauerhaft fixe
     // Pool-Qualitaetsstufe des Bots und ruestet Slot fuer Slot ueber die bereits in Runde 133 live
     // bestaetigte EquipBotItem()-Logik aus. Kein itemEntry-Parameter noetig (im Gegensatz zu
     // '.bottest equip') - die Auswahl passiert automatisch nach Level/Klasse/Qualitaetsstufe.
+    // .bottest factory <count>
+    // OI-051: legt <count> neue Bots nach den Playerbots.*-Matrizen an (Konto, Charakter, Login, Ausbau, Platzierung, Logout).
+    static bool HandleBotTestFactory(ChatHandler* handler, char const* args)
+    {
+        std::istringstream iss(args ? args : "");
+        uint32 count = 0;
+        iss >> count;
+        if (count == 0 || count > 2000)
+        {
+            handler->SendSysMessage("Syntax: .bottest factory <Anzahl 1-2000>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+        handler->PSendSysMessage("[bottest] factory: %s", sBotPop->QueueFactory(count).c_str());
+        return true;
+    }
+
+    // .bottest pop status|on|off|target <min> <max>
+    static bool HandleBotTestPop(ChatHandler* handler, char const* args)
+    {
+        std::istringstream iss(args ? args : "");
+        std::string sub;
+        iss >> sub;
+        if (sub == "on")
+            sBotPop->SetManagerEnabled(true);
+        else if (sub == "off")
+            sBotPop->SetManagerEnabled(false);
+        else if (sub == "target")
+        {
+            uint32 lo = 0, hi = 0;
+            iss >> lo >> hi;
+            sBotPop->SetTarget(lo, hi < lo ? lo : hi);
+        }
+        else if (sub != "status" && !sub.empty())
+        {
+            handler->SendSysMessage("Syntax: .bottest pop status|on|off|target <min> <max>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+        handler->PSendSysMessage("[bottest] pop: %s", sBotPop->Status().c_str());
+        return true;
+    }
+
+    // .bottest popselftest [Anzahl]  (Verteilungs-Stichprobe ohne Eingriff in den Server)
+    static bool HandleBotTestPopSelfTest(ChatHandler* handler, char const* args)
+    {
+        std::istringstream iss(args ? args : "");
+        uint32 n = 1000;
+        iss >> n;
+        handler->PSendSysMessage("[bottest] popselftest: %s", sBotPop->SelfTest(n).c_str());
+        return true;
+    }
+    // .bottest raidpool <Anzahl> <ilvl> <alliance|horde>  (Stufe-110-Bots fuer vorgebaute LFR-Gruppen, Praefix "lfrbot")
+    static bool HandleBotTestRaidPool(ChatHandler* handler, char const* args)
+    {
+        std::istringstream iss(args ? args : "");
+        uint32 count = 0, ilvl = 0, firstSlot = 0;
+        std::string faction;
+        iss >> count >> ilvl >> faction >> firstSlot;
+        if (count == 0 || count > 500 || ilvl == 0 || (faction != "alliance" && faction != "horde"))
+        {
+            handler->SendSysMessage("Syntax: .bottest raidpool <Anzahl 1-500> <Ziel-Itemlevel> <alliance|horde> [Startslot 0-24: 0-1 Tank, 2-6 Heiler, 7+ Schaden]");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+        handler->PSendSysMessage("[bottest] raidpool: %s", sBotPop->QueueRaidPool(count, uint16(ilvl), faction == "alliance", "lfrbot", firstSlot).c_str());
+        return true;
+    }
+
+    // .bottest lfrtest <accountId> <dungeonId> <tank|heal|dps>  (Bot meldet sich als wartender "echter Spieler" an)
+    static bool HandleBotTestLfrTest(ChatHandler* handler, char const* args)
+    {
+        std::istringstream iss(args ? args : "");
+        uint32 accountId = 0, dungeonId = 0;
+        std::string role;
+        iss >> accountId >> dungeonId >> role;
+        uint8 mask = role == "tank" ? 0x02 : (role == "heal" ? 0x04 : (role == "dps" ? 0x08 : 0));
+        if (!accountId || !dungeonId || !mask)
+        {
+            handler->SendSysMessage("Syntax: .bottest lfrtest <accountId> <dungeonId> <tank|heal|dps>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+        std::string summary;
+        bool ok = sBotMgr->TestQueueBotAsRealPlayer(accountId, dungeonId, mask, summary);
+        handler->PSendSysMessage("[bottest] lfrtest: %s - %s", ok ? "OK" : "FEHLER", summary.c_str());
+        return ok;
+    }
+
+    // .bottest lfrstatus
+    static bool HandleBotTestLfrStatus(ChatHandler* handler, char const* /*args*/)
+    {
+        handler->PSendSysMessage("[bottest] lfrstatus: %s", sBotMgr->LfrStatus().c_str());
+        return true;
+    }
+    // .bottest summon  (Konzept wie "summon" im 3.3.5-Playerbot-Modul): teleportiert alle Bots der eigenen Gruppe zur Position des Aufrufers
+    static bool HandleBotTestSummon(ChatHandler* handler, char const* /*args*/)
+    {
+        Player* me = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        Group* group = me ? me->GetGroup() : nullptr;
+        if (!me || !group)
+        {
+            handler->SendSysMessage("Du musst in einer Gruppe sein (Konsole geht nicht).");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+        uint32 moved = 0;
+        uint32 total = sBotMgr->SummonGroupBots(me, moved);
+        handler->PSendSysMessage("[bottest] summon: %u von %u Gruppen-Bots zu dir teleportiert.", moved, total);
+        return true;
+    }
+
+    // .bottest place <accountId>
+    // OI-051: teleportiert den Bot zu einem zu Stufe, Fraktion und Klasse passenden Questgeber-Gebiet.
+    static bool HandleBotTestPlace(ChatHandler* handler, char const* args)
+    {
+        std::istringstream iss(args ? args : "");
+        uint32 accountId = 0;
+        iss >> accountId;
+        if (accountId == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest place <accountId>");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::string summary;
+        bool ok = sBotMgr->PlaceBotByLevel(accountId, summary);
+        handler->PSendSysMessage("[bottest] place(account %u): %s - %s", accountId, ok ? "OK" : "FEHLER", summary.c_str());
+        return ok;
+    }
+
+    // .bottest provision <accountId> <level 1-110> [specId]
+    // OI-051: bringt einen eingeloggten Bot auf die Stufe (nur aufwaerts) mit Spezialisierung, Talenten und
+    // stufenpassender Ausruestung aus dem Pool. specId 0/leer = Standard-Spezialisierung der Klasse.
+    static bool HandleBotTestProvision(ChatHandler* handler, char const* args)
+    {
+        std::istringstream iss(args ? args : "");
+        uint32 accountId = 0, level = 0, specId = 0, ilvl = 0;
+        std::string specOrRole;
+        iss >> accountId >> level >> specOrRole >> ilvl;
+
+        // 3. Argument: Rolle (tank/heal/dps) oder numerische specId; 4. Argument: Ziel-Itemlevel (0/leer = Pool-Wahl)
+        uint8 role = 0;
+        if (specOrRole == "tank")
+            role = 1;
+        else if (specOrRole == "heal" || specOrRole == "healer")
+            role = 2;
+        else if (specOrRole == "dps")
+            role = 3;
+        else if (!specOrRole.empty())
+            specId = uint32(std::strtoul(specOrRole.c_str(), nullptr, 10));
+
+        if (accountId == 0 || level == 0)
+        {
+            handler->SendSysMessage("Syntax: .bottest provision <accountId> <level 1-110> [tank|heal|dps|specId] [Ziel-Ilvl] (nur aufwaerts)");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::string summary;
+        bool ok = sBotMgr->ProvisionBot(accountId, uint8(std::min<uint32>(level, 255)), specId, role,
+            uint16(std::min<uint32>(ilvl, 2000)), summary);
+        handler->PSendSysMessage("[bottest] provision(account %u): %s - %s", accountId, ok ? "OK" : "FEHLER", summary.c_str());
+        return ok;
+    }
+
     static bool HandleBotTestEquipFromPool(ChatHandler* handler, char const* args)
     {
         if (!*args)
@@ -1025,7 +1206,7 @@ public:
 
             // Runde 132 (28.09.2026): Tod-Handling-Zustand zusaetzlich sichtbar machen (Auftragsvorgabe
             // "'.bottest status' muss den korrekten Zustand widerspiegeln") - IsAlive()/PLAYER_FLAGS_GHOST/
-            // Resurrection-Sickness-Aura 15007, damit ein Release/Revive-Livetest ohne DB-Blick prüfbar ist.
+            // Resurrection-Sickness-Aura 15007, damit ein Release/Revive-Livetest ohne DB-Blick prÃ¼fbar ist.
             handler->PSendSysMessage("[bottest] status(account %u): IsAlive()=%u, HasFlag(PLAYER_FLAGS_GHOST)=%u, "
                 "getDeathState()=%u, ResurrectionSickness(Aura 15007)=%u.", accountId, player->IsAlive(),
                 player->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST), uint32(player->getDeathState()),

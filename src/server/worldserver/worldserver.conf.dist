@@ -4274,5 +4274,94 @@ OllamaChat.SystemPrompt = "You are a World of Warcraft player character in a Leg
 OllamaChat.MaxConcurrentRequests = 4
 
 #
+#    OllamaChat.TimeoutSeconds
+#       Description: Gesamtfrist je Ollama-Anfrage in Sekunden (Senden + Warten + Lesen, 1-600). Bei
+#                    Ueberschreitung entfaellt die Antwort und der Anfrage-Slot wird wieder frei.
+#                    Hinweis: Das erste Laden eines Modells (nach ca. 5 Minuten Leerlauf entlaedt Ollama
+#                    es) kann einige Sekunden dauern.
+#       Default:     30
+#
+
+OllamaChat.TimeoutSeconds = 30
+
+#
+#    Playerbots.Autostart.Enable
+#       Description: Bot-Accounts nach einem Serverneustart automatisch wieder einloggen (die
+#                    Bot-Accounts/-Charaktere liegen in der DB, nur die Sitzungen gehen beim Neustart
+#                    verloren). Gilt nur fuer die unter Playerbots.Autostart.AccountIds genannten Accounts.
+#       Default:     0
+#
+#    Playerbots.Autostart.AccountIds
+#       Description: Kommagetrennte Account-Ids, Bereiche mit Bindestrich erlaubt, z. B. "30,31,100-160".
+#       Default:     ""
+#
+#    Playerbots.Autostart.PerSecond
+#       Description: Wie viele Bot-Logins pro Sekunde ausgeloest werden (1-50), damit der Start bei vielen
+#                    Bots nicht in einem Schlag passiert.
+#       Default:     2
+#
+#    Playerbots.Autostart.DelaySeconds
+#       Description: Wartezeit nach dem Serverstart bis zum ersten Autostart-Login (0-3600).
+#       Default:     15
+#
+
+Playerbots.Autostart.Enable = 0
+Playerbots.Autostart.AccountIds = ""
+Playerbots.Autostart.PerSecond = 2
+Playerbots.Autostart.DelaySeconds = 15
+
+#
+#    Bot-Fabrik und Bot-Population (BotPopulationMgr) - Konzept wie beim 3.3.5-Playerbots-Modul, eigene Umsetzung
+#
+#    Playerbots.Pop.Enable                 Autonomer Manager: haelt eine Soll-Anzahl Fabrik-Bots online (0/1). Standard 0
+#    Playerbots.Pop.AccountPrefix          Praefix der Fabrik-Konten. Standard "rndbot"
+#    Playerbots.Pop.MinOnline / MaxOnline  Soll-Bereich eingeloggter Fabrik-Bots (zufaellig dazwischen). Standard 0 / 0
+#    Playerbots.Pop.UpdateIntervalSeconds  Manager-Takt. Standard 20
+#    Playerbots.Pop.BotsPerInterval        Max. Logins/Logouts pro Takt (Lastschutz). Standard 5
+#    Playerbots.Pop.TargetChangeMinSeconds / TargetChangeMaxSeconds  Neu-Wuerfeln der Soll-Anzahl. Standard 1800 / 7200
+#    Playerbots.Factory.Parallel           Gleichzeitig bearbeitete Fabrik-Auftraege (1-10). Standard 2
+#    Playerbots.Factory.KeepOnline         Neue Bots nach dem Ausbau eingeloggt lassen (0/1). Standard 0
+#
+#    Verteilungsmatrizen (Klasse/Volk/Spec nur ueber im Core gueltige Volk-Klasse-Paare):
+#    Playerbots.AllianceRatio / HordeRatio Fraktionsverhaeltnis. Standard 50 / 50
+#    Playerbots.ClassWeight.<1-12>         Gewicht je Klasse (1 Krieger .. 12 Daemonenjaeger), 0 = nie. Standard 1
+#    Playerbots.RaceWeight.<Id>            Gewicht je Volk (Rassen-ID), 0 = nie. Standard 1
+#    Playerbots.SpecWeight.<Klasse>.<0-7>  Gewicht je Spezialisierung (Index in der Klasse). Standard 1
+#    Playerbots.RoleMix                    Rollenmischung "tank=10,heal=15,dps=75"; leer = nur SpecWeight. Standard wie genannt
+#    Playerbots.Level.Min / Max            Stufenbereich. Standard 1 / 110
+#    Playerbots.Level.MinChance / MaxChance  Wahrscheinlichkeit exakt Min- bzw. Max-Stufe (0-1). Standard 0.05 / 0.10
+#    Playerbots.Level.Bands                Baender "von-bis:Gewicht,..." fuer den Rest. Standard "1-9:10,10-29:20,30-59:20,60-89:20,90-100:15,101-110:15"
+#    Playerbots.Gear.TargetIlvlAtMaxLevel  Ziel-Itemlevel fuer Stufe-110-Bots (0 = Pool-Zufall, LFR ab 825-890). Standard 0
+#
+
+Playerbots.Pop.Enable = 0
+Playerbots.Pop.AccountPrefix = "rndbot"
+Playerbots.Pop.MinOnline = 0
+Playerbots.Pop.MaxOnline = 0
+Playerbots.Pop.UpdateIntervalSeconds = 20
+Playerbots.Pop.BotsPerInterval = 5
+Playerbots.Pop.TargetChangeMinSeconds = 1800
+Playerbots.Pop.TargetChangeMaxSeconds = 7200
+Playerbots.Factory.Parallel = 2
+Playerbots.Factory.KeepOnline = 0
+Playerbots.AllianceRatio = 50
+Playerbots.HordeRatio = 50
+Playerbots.RoleMix = "tank=10,heal=15,dps=75"
+Playerbots.Level.Min = 1
+Playerbots.Level.Max = 110
+Playerbots.Level.MinChance = 0.05
+Playerbots.Level.MaxChance = 0.10
+Playerbots.Level.Bands = "1-9:10,10-29:20,30-59:20,60-89:20,90-100:15,101-110:15"
+Playerbots.Gear.TargetIlvlAtMaxLevel = 0
+
+#
+#    Logger.scripts.ollamachat
+#       Description: Ohne diese Zeile werden die Info-Meldungen des Moduls (z. B. "antwortet ... via
+#                    Whisper") nicht ausgegeben. Format wie bei den anderen Logger-Zeilen:
+#                    Logger.scripts.ollamachat=<Level>,<Appender>
+#       Beispiel:    Logger.scripts.ollamachat=3,Console Server
+#
+
+#
 ###################################################################################################
 ###################################################################################################

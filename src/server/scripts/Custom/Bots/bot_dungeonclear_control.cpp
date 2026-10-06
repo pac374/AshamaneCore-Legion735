@@ -104,6 +104,24 @@ class bot_dungeonclear_control_chat : public PlayerScript
             if (type != CHAT_MSG_PARTY && type != CHAT_MSG_RAID)
                 return;
 
+            // Fuehrung/Pull-Modus: "!dc lead <BotName>", "!dc mode normal|pack|leeroy|combo", "!dc info"
+            {
+                std::string lowerMsg = msg;
+                std::transform(lowerMsg.begin(), lowerMsg.end(), lowerMsg.begin(), [](unsigned char c) { return std::tolower(c); });
+                std::string reply;
+                if (lowerMsg.compare(0, 9, "!dc lead ") == 0 && msg.size() > 9)
+                    reply = sBotMgr->SetGroupLead(player, msg.substr(9));
+                else if (lowerMsg.compare(0, 9, "!dc mode ") == 0 && msg.size() > 9)
+                    reply = sBotMgr->SetGroupMode(player, lowerMsg.substr(9));
+                else if (lowerMsg == "!dc info")
+                    reply = sBotMgr->GroupLeadStatus(player);
+                if (!reply.empty())
+                {
+                    ChatHandler(player->GetSession()).PSendSysMessage("%s", reply.c_str());
+                    return;
+                }
+            }
+
             bool enable = false;
             bool isStatusQuery = false;
             if (!ParseChatKeywordCommand(msg, enable, isStatusQuery))
