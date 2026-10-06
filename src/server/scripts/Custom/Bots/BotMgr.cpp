@@ -5762,28 +5762,91 @@ bool BotMgr::QueueBotRaidGroup(uint32 dungeonId, uint32 teamId, uint8 realTanks,
 
     struct Candidate { uint32 Account; Player* Bot; };
     std::vector<Candidate> pool[3]; // 0 Tank, 1 Heiler, 2 Schaden
+    uint32 rejNotInWorld = 0, rejFiller = 0, rejDeadGroupMap = 0, rejTeamLevel = 0, rejIlvl = 0, rejLfgState = 0;
     for (auto& [accountId, entry] : _botSessions)
     {
         if (!entry.Session || entry.State != BotCharacterState::STATE_IN_WORLD)
+        {
+            ++rejNotInWorld;
             continue;
+        }
         if (_lfgFillerBotAccountIds.count(accountId) || _lfgTestRealAccounts.count(accountId))
+        {
+            ++rejFiller;
             continue;
+        }
         Player* bot = entry.Session->GetPlayer();
+        if (bot && bot->IsInWorld() && !bot->GetGroup() && (!bot->IsAlive() || bot->GetMap()->Instanceable()))
+        {
+            // Pool bots are saved as ghosts or inside an instance (199 of 253 were dead/ghost, 22 on map 1520) and never became candidates.
+            // Revive them and move them to their faction's capital; they qualify at a later demand tick (spec Raid-Pool-Konten).
+            if (!bot->IsAlive())
+            {
+                bot->ResurrectPlayer(1.0f);
+                bot->SpawnCorpseBones();
+            }
+            if (bot->GetTeamId() == TEAM_ALLIANCE)
+                bot->TeleportTo(0, -8833.4f, 628.6f, 94.0f, 1.1f);
+            else
+                bot->TeleportTo(1, 1629.4f, -4373.4f, 31.3f, 3.5f);
+            ++rejDeadGroupMap;
+            continue;
+        }
         if (!bot || !bot->IsInWorld() || !bot->IsAlive() || bot->GetGroup() || bot->GetMap()->Instanceable())
+        {
+            ++rejDeadGroupMap;
             continue;
+        }
         if (bot->GetTeamId() != TeamId(teamId) || bot->getLevel() < dungeon->minlevel)
+        {
+            ++rejTeamLevel;
             continue;
+        }
         if (bot->GetAverageItemLevelEquipped() < float(dungeon->requiredItemLevel))
+        {
+            ++rejIlvl;
             continue;
+        }
         if (sLFGMgr->GetState(bot->GetGUID()) != LFG_STATE_NONE)
+        {
+            ++rejLfgState;
             continue;
+        }
         uint8 const mask = BotLfgRoleMask(bot);
         pool[mask == PLAYER_ROLE_TANK ? 0 : (mask == PLAYER_ROLE_HEALER ? 1 : 2)].push_back({ accountId, bot });
     }
 
+    // Role gaps: switch damage bots of classes that have a healer/tank specialization (random specs left the pool with 0-2 healers of 253 bots)
+    for (int r : { 1, 0 })
+    {
+        int missing = need[r] - int(pool[r].size());
+        for (size_t i = 0; i < pool[2].size() && missing > 0;)
+        {
+            Player* b = pool[2][i].Bot;
+            ChrSpecializationEntry const* target = nullptr;
+            for (ChrSpecializationEntry const* s : sChrSpecializationStore)
+                if (s->ClassID == b->getClass() && int(s->Role) == r)
+                {
+                    target = s;
+                    break;
+                }
+            if (!target)
+            {
+                ++i;
+                continue;
+            }
+            b->ActivateTalentGroup(target);
+            pool[r].push_back(pool[2][i]);
+            pool[2].erase(pool[2].begin() + i);
+            --missing;
+        }
+    }
+
     std::ostringstream have;
     have << "Kandidaten Tank " << pool[0].size() << "/" << need[0] << ", Heiler " << pool[1].size() << "/" << need[1]
-         << ", Schaden " << pool[2].size() << "/" << need[2] << " (Stufe >= " << uint32(dungeon->minlevel) << ", Ilvl >= " << dungeon->requiredItemLevel << ")";
+         << ", Schaden " << pool[2].size() << "/" << need[2] << " (Stufe >= " << uint32(dungeon->minlevel) << ", Ilvl >= " << dungeon->requiredItemLevel << ")"
+         << " | abgelehnt: nicht in Welt " << rejNotInWorld << ", Fueller/Test " << rejFiller << ", tot/Gruppe/Instanz " << rejDeadGroupMap
+         << ", Fraktion/Stufe " << rejTeamLevel << ", Ilvl " << rejIlvl << ", LFG-Zustand " << rejLfgState;
     for (int r = 0; r < 3; ++r)
         if (int(pool[r].size()) < need[r])
         {
@@ -5998,7 +6061,10 @@ uint32 BotMgr::EnsureLfrPoolOnline(uint32 teamId, uint32 maxLogins)
     {
         _lfrPoolLoaded = true;
         // einmaliger, synchroner Lesezugriff (Konten-Praefix LFRBOT, Fraktion ueber das Volk des ersten Charakters)
-        if (QueryResult result = CharacterDatabase.Query("SELECT ch.`account`, ch.`race` FROM `characters` ch JOIN `auth`.`account` a ON a.`id` = ch.`account` "
+        // Healer-capable classes (priest, paladin, shaman, monk, druid) are interleaved 1:3 with the others, so any batch of 30 logins
+        // contains healers; a plain account-id order delivered only 2 of 5 needed healers per batch and the group never formed
+        std::vector<uint32> healerAccounts[2], otherAccounts[2];
+        if (QueryResult result = CharacterDatabase.Query("SELECT ch.`account`, ch.`race`, MIN(ch.`class`) FROM `characters` ch JOIN `auth`.`account` a ON a.`id` = ch.`account` "
             "WHERE a.`username` LIKE 'LFRBOT%' GROUP BY ch.`account`, ch.`race` ORDER BY ch.`account`"))
         {
             do
@@ -6006,8 +6072,22 @@ uint32 BotMgr::EnsureLfrPoolOnline(uint32 teamId, uint32 maxLogins)
                 Field* fields = result->Fetch();
                 uint32 const accountId = fields[0].GetUInt32();
                 uint8 const race = fields[1].GetUInt8();
-                _lfrPoolAccounts[Player::TeamForRace(race) == HORDE ? 1 : 0].push_back(accountId);
+                uint8 const classId = fields[2].GetUInt8();
+                bool const healerCapable = classId == CLASS_PRIEST || classId == CLASS_PALADIN || classId == CLASS_SHAMAN || classId == CLASS_MONK || classId == CLASS_DRUID;
+                uint8 const team = Player::TeamForRace(race) == HORDE ? 1 : 0;
+                (healerCapable ? healerAccounts[team] : otherAccounts[team]).push_back(accountId);
             } while (result->NextRow());
+        }
+        for (uint8 team = 0; team < 2; ++team)
+        {
+            size_t h = 0, o = 0;
+            while (h < healerAccounts[team].size() || o < otherAccounts[team].size())
+            {
+                if (h < healerAccounts[team].size())
+                    _lfrPoolAccounts[team].push_back(healerAccounts[team][h++]);
+                for (int i = 0; i < 3 && o < otherAccounts[team].size(); ++i)
+                    _lfrPoolAccounts[team].push_back(otherAccounts[team][o++]);
+            }
         }
         TC_LOG_INFO("scripts.bots", "BotMgr::EnsureLfrPoolOnline: Raid-Pool geladen: Allianz %u, Horde %u Konten.",
             uint32(_lfrPoolAccounts[0].size()), uint32(_lfrPoolAccounts[1].size()));
