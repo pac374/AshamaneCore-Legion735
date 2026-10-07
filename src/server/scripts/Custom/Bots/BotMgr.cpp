@@ -355,6 +355,44 @@ void BotMgr::LoadConfig()
 
 void BotMgr::Tick(uint32 diff)
 {
+    // Raid-Status-Diagnose (nur mit Playerbots.Debug.Combat): alle 30 s je Raidgruppe Zahlen zu den Bots in der Instanz
+    static uint32 raidStatusMs = 0;
+    raidStatusMs += diff;
+    if (raidStatusMs >= 30000)
+    {
+        raidStatusMs = 0;
+        if (IsCombatDebug())
+        {
+            struct Cnt { uint32 Total = 0, Alive = 0, InCombat = 0, Victim = 0, Ghost = 0, FarFromVictim = 0; float BossPct = -1.0f; };
+            std::map<uint64, Cnt> perGroup;
+            for (auto const& [acc, entry] : _botSessions)
+            {
+                Player* p = entry.Session ? entry.Session->GetPlayer() : nullptr;
+                if (!p || !p->IsInWorld() || !p->GetMap() || !p->GetMap()->IsRaid() || !p->GetGroup())
+                    continue;
+                Cnt& c = perGroup[p->GetGroup()->GetGUID().GetCounter()];
+                ++c.Total;
+                if (p->IsAlive())
+                    ++c.Alive;
+                else
+                    ++c.Ghost;
+                if (p->IsInCombat())
+                    ++c.InCombat;
+                if (Unit* v = p->GetVictim())
+                {
+                    ++c.Victim;
+                    if (p->GetDistance(v) > 40.0f)
+                        ++c.FarFromVictim;
+                    if (v->ToCreature() && v->ToCreature()->IsDungeonBoss())
+                        c.BossPct = v->GetHealthPct();
+                }
+            }
+            for (auto const& [g, c] : perGroup)
+                TC_LOG_INFO("scripts.bots", "BotMgr::RaidStatus: Gruppe %u: %u Bots in Raidkarte, lebend %u, tot %u, im Kampf %u, mit Ziel %u (davon >40 yd entfernt %u), Boss-HP %.2f%%.",
+                    uint32(g), c.Total, c.Alive, c.Ghost, c.InCombat, c.Victim, c.FarFromVictim, c.BossPct);
+        }
+    }
+
     // OI-020: gestaffelter Autostart - nach der Startverzoegerung pro Sekunde _autostartPerSecond Logins
     // ausloesen (CharEnum -> Login laeuft danach wie bei '.bottest login' unten in der Schleife).
     if (_autostartNext < _autostartQueue.size())
@@ -4755,12 +4793,18 @@ bool BotMgr::ProcessBotMechanicReactions(Player* bot, BotSpecRotation const* rot
     {
         std::vector<HarmfulZone> zones;
         CollectHarmfulAreaTriggers(bot, 35.0f, zones);
+        size_t addZoneStart = zones.size();
         // Playbook: als AVOID markierte Adds (z.B. Corrupted Vermin mit Burst of Corruption) sind wie Boden-Flaechen mit 9 yd Radius zu meiden
         if (bot->GetMap()->IsRaid())
         {
             Playbook const* avoidPb = nullptr;
-            if (PbFindBoss(bot, avoidPb))
+            if (Creature* avoidBoss = PbFindBoss(bot, avoidPb))
             {
+                // Nythendra Phase 3 (Heart of the Swarm, 20 s): die Infested-Ground-Flaechen wandern zum Boss und der Boss greift nicht an. Laut
+                // Wowhead-Guide soll der Schaden dort maximal sein und nur den Vermin ausgewichen werden - die Bodenflaechen werden ignoriert.
+                if (avoidBoss->GetEntry() == 102672 && PbPhaseOf(avoidBoss, *avoidPb) == 3)
+                    zones.clear();
+                addZoneStart = zones.size();
                 std::set<uint32> avoidEntries;
                 for (PbAdd const& a : avoidPb->Adds)
                     if (a.Mode == 2)
@@ -4771,18 +4815,23 @@ bool BotMgr::ProcessBotMechanicReactions(Player* bot, BotSpecRotation const* rot
                     bot->GetCreatureListWithEntryInGrid(found, entry, 40.0f);
                     for (Creature* c : found)
                         if (c->IsAlive())
-                            zones.push_back({ c->GetPositionX(), c->GetPositionY(), 9.0f });
+                            zones.push_back({ c->GetPositionX(), c->GetPositionY(), 11.0f }); // Burst of Corruption: 8-10 yd + Sicherheitsrand
                 }
             }
         }
         bool under = false;
-        for (HarmfulZone const& z : zones)
-            if (bot->GetExactDist2d(z.X, z.Y) <= z.Radius)
+        bool underAdd = false; // in der Burst-Zone eines Vermin-Adds: nie im Arbeitszyklus stehen bleiben (9 von 15 Toden im Test 07.10.)
+        for (size_t zi = 0; zi < zones.size(); ++zi)
+            if (bot->GetExactDist2d(zones[zi].X, zones[zi].Y) <= zones[zi].Radius)
+            {
                 under = true;
+                if (zi >= addZoneStart)
+                    underAdd = true;
+            }
         // Arbeitszyklus: nach einem Ausweichen darf der Bot 5 s lang wieder angreifen (auch in der Flaeche, solange er ueber 60 % Leben hat).
         // Sonst weichen Nahkaempfer endlos der Bodenflaeche unter dem Boss aus und machen keinen Schaden (Test 07.10.: Boss bei 99,9 % nach 10 min).
         static std::unordered_map<uint64, uint32> noDodgeUntil, dodgeActiveUntil;
-        if (under && uint32(getMSTime()) >= dodgeActiveUntil[bot->GetGUID().GetCounter()] && uint32(getMSTime()) < noDodgeUntil[bot->GetGUID().GetCounter()] && bot->GetHealthPct() > 60.0f)
+        if (under && !underAdd && uint32(getMSTime()) >= dodgeActiveUntil[bot->GetGUID().GetCounter()] && uint32(getMSTime()) < noDodgeUntil[bot->GetGUID().GetCounter()] && bot->GetHealthPct() > 60.0f)
             under = false;
         if (under)
         {
@@ -6015,6 +6064,23 @@ bool BotMgr::QueueBotRaidGroup(uint32 dungeonId, uint32 teamId, uint8 realTanks,
         sLFGMgr->UpdateRoleCheck(gguid, m.Bot->GetGUID(), mask);
 
     LfgState const state = sLFGMgr->GetState(gguid);
+
+    // Artefaktwaffe (NACH der LFG-Anmeldung, weil das Artefakt das durchschnittliche Itemlevel unter die Schranke druecken kann): Pool-Bots haben sonst eine normale Waffe ohne Traits (Pruefung 07.10.: 0 von 253). Wer in der Main-Hand kein Artefakt traegt,
+    // bekommt das passende Artefakt der aktuellen Spezialisierung (EquipBotArtifact) und ein Trait-Budget (SkillBotArtifact, 30 Raenge = grobe
+    // Naeherung an ein Artefakt um Artefaktstufe 30; die Funktion beachtet Link-Abhaengigkeiten und Tier-Freischaltung).
+    for (uint32 acc : tracked.Accounts)
+    {
+        auto sit = _botSessions.find(acc);
+        Player* ap = (sit != _botSessions.end() && sit->second.Session) ? sit->second.Session->GetPlayer() : nullptr;
+        if (!ap || !ap->IsInWorld())
+            continue;
+        Item* mh = ap->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND);
+        if (mh && mh->GetTemplate()->GetArtifactID() != 0)
+            continue;
+        if (EquipBotArtifact(acc))
+            SkillBotArtifact(acc, 30);
+    }
+
     for (uint32 acc : tracked.Accounts)
         _lfgFillerBotAccountIds.insert(acc);
 
