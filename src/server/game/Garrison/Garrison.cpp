@@ -201,7 +201,7 @@ bool Garrison::LoadFromDB()
             mission.PacketInfo.MissionState     = fields[4].GetUInt8();
 
             if (mission.PacketInfo.StartTime == 0)
-                mission.PacketInfo.StartTime = time_t(2254525440);
+                mission.PacketInfo.StartTime = time_t(2288912640); // same magic date as the GarrisonMission packet default
 
             mission.PacketInfo.SuccessChance = sGarrisonMgr.GetMissionSuccessChance(this, missionId);
 
@@ -290,7 +290,9 @@ void Garrison::SaveToDB(CharacterDatabaseTransaction& trans)
         stmt->setUInt8(index++, _garrisonType);
         stmt->setUInt32(index++, mission.PacketInfo.MissionRecID);
         stmt->setUInt32(index++, mission.PacketInfo.OfferTime);
-        stmt->setUInt32(index++, mission.PacketInfo.StartTime != time_t(2254525440) ? mission.PacketInfo.StartTime: 0);
+        // unstarted missions carry a magic date (packet default 2288912640, older load path 2254525440); the column is a signed INT
+        bool const unstarted = mission.PacketInfo.StartTime == time_t(2288912640) || mission.PacketInfo.StartTime == time_t(2254525440);
+        stmt->setUInt32(index++, unstarted ? 0 : uint32(mission.PacketInfo.StartTime));
         stmt->setUInt32(index++, mission.PacketInfo.MissionState);
         trans->Append(stmt);
 
