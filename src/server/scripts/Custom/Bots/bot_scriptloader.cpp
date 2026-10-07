@@ -106,6 +106,7 @@ class bot_worldscript_tick : public WorldScript
 #include "Log.h"
 #include "Timer.h"
 #include <map>
+#include <unordered_map>
 #include <mutex>
 #include <vector>
 #include <algorithm>
@@ -123,6 +124,9 @@ class bot_raid_damage_diag : public UnitScript, public PlayerScript
             if (!map || !map->IsRaid() || attacker->GetTypeId() == TYPEID_PLAYER)
                 return;
             std::lock_guard<std::mutex> lock(_mutex);
+            _lastHit[victim->GetGUID()] = { attacker->GetEntry(), spell ? spell->Id : 0u, damage, getMSTime() };
+            if (_lastHit.size() > 600)
+                _lastHit.clear();
             Source& s = _sources[{ attacker->GetEntry(), spell ? spell->Id : 0u }];
             s.Total += damage;
             ++s.Hits;
@@ -143,11 +147,28 @@ class bot_raid_damage_diag : public UnitScript, public PlayerScript
         void OnPlayerKilledByCreature(Creature* killer, Player* killed) override
         {
             if (sBotMgr->IsCombatDebug() && killer && killed && sBotMgr->IsBotPlayerGuid(killed->GetGUID()) && killed->GetMap() && killed->GetMap()->IsRaid())
-                TC_LOG_INFO("scripts.bots", "BotMgr::DamageDiag: Bot %s von '%s' (Entry %u) getoetet (HP-Max %u).", killed->GetName().c_str(), killer->GetName().c_str(), killer->GetEntry(), uint32(killed->GetMaxHealth()));
+            {
+                // Todes-Protokoll je Bot: Killer, letzter Treffer (Zauber, Schaden), Position, Klasse
+                uint32 lastSpell = 0, lastDamage = 0;
+                {
+                    std::lock_guard<std::mutex> lock(_mutex);
+                    auto it = _lastHit.find(killed->GetGUID());
+                    if (it != _lastHit.end())
+                    {
+                        lastSpell = it->second.SpellId;
+                        lastDamage = it->second.Damage;
+                    }
+                }
+                TC_LOG_INFO("scripts.bots", "BotMgr::DamageDiag: Bot %s (Klasse %u) von '%s' (Entry %u) getoetet, letzter Treffer Zauber %u Schaden %u, Pos %.1f %.1f %.1f, Boss-Abstand %.1f (HP-Max %u).",
+                    killed->GetName().c_str(), uint32(killed->getClass()), killer->GetName().c_str(), killer->GetEntry(), lastSpell, lastDamage,
+                    killed->GetPositionX(), killed->GetPositionY(), killed->GetPositionZ(), killed->GetDistance(killer), uint32(killed->GetMaxHealth()));
+            }
         }
 
     private:
         struct Source { uint64 Total = 0; uint32 Hits = 0, Max = 0, MaxHealth = 0; };
+        struct LastHit { uint32 AttackerEntry = 0, SpellId = 0, Damage = 0, Time = 0; };
+        std::unordered_map<ObjectGuid, LastHit> _lastHit;
         std::mutex _mutex;
         std::map<std::pair<uint32, uint32>, Source> _sources;
         uint32 _lastLog = 0;

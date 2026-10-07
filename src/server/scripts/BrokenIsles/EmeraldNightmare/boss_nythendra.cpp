@@ -384,15 +384,19 @@ class spell_nythendra_volatile_rot_damage : public SpellScript
 
     void CalcDamage(SpellEffIndex /*effIndex*/)
     {
-        Unit* target = GetExplTargetUnit();
+        // Volatile Rot: full damage within 10 yd of the carrier, falling off linearly to nothing at 15 yd (DBM/BigWigs/LegionCore values).
+        // The old formula multiplied by 1/distance, which exceeded 100% below 1 yd and divided by zero at 0 yd.
+        Unit* target = GetHitUnit();
 
-        if (!target)
+        if (!target || !GetCaster())
             return;
 
-        float castertoTargetDist = GetCaster()->GetDistance2d(target);
+        float const dist = GetCaster()->GetDistance2d(target);
+        float factor = 1.0f;
+        if (dist > 10.0f)
+            factor = std::max(0.0f, 1.0f - (dist - 10.0f) / 5.0f);
 
-        int32 damage = GetHitDamage();
-        SetHitDamage(damage * (1 / castertoTargetDist));
+        SetHitDamage(int32(GetHitDamage() * factor));
     }
 
     void Register() override

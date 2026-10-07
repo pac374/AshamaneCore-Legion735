@@ -66,6 +66,7 @@
 #include <unordered_set>
 #include <set>
 #include <algorithm>
+#include <unordered_map>
 
 BotMgr* BotMgr::instance()
 {
@@ -3651,7 +3652,7 @@ namespace
 {
     struct PbAdd { uint32 Add; uint8 Phase; uint8 Prio; uint8 RoleMask; uint8 Mode; };            // Mode: 0 KILL, 1 IGNORE, 2 AVOID, 3 TANK_ONLY
     struct PbPos { uint8 Phase; uint8 Role; uint8 Anchor; int16 Angle; float Dist; float Spread; }; // Anchor: 0 BOSS, 1 BOSS_FACING_BACK, 2 ROOM_EDGE_AWAY, 3 TANK
-    struct PbAvoid { uint32 Spell; uint8 Kind; uint8 Phase; uint8 RoleMask; float Radius; };      // Kind: 0 AREATRIGGER, 1 AURA_SELF, 2 FRONTAL_CONE, 3 REAR_CONE, 4 CAST_AREA
+    struct PbAvoid { uint32 Spell; uint8 Kind; uint8 Phase; uint8 RoleMask; float Radius; };      // Kind: 0 AREATRIGGER, 1 AURA_SELF, 2 FRONTAL_CONE, 3 REAR_CONE, 4 CAST_AREA, 5 NPC_PROXIMITY (Spell = Creature-Entry)
     struct PbPhase { uint8 Phase; uint8 Trigger; int32 Value; uint32 Ref; };                      // Trigger: 0 START, 1 HP_BELOW, 2 POWER_ZERO, 3 AURA_ON_BOSS, 4 BOSS_PASSIVE, 5 ADD_DEAD_COUNT
     struct PbInterrupt { uint32 Caster; uint32 Spell; uint8 Prio; };                              // Caster 0 = beliebiger Wirker
     struct PbDispel { uint32 Aura; uint8 Prio; uint8 MinStacks; };
@@ -3718,7 +3719,7 @@ namespace
                 Field* f = r->Fetch();
                 auto itr = g_playbooks.find(f[0].GetUInt32());
                 if (itr != g_playbooks.end())
-                    itr->second.Avoid.push_back({ f[1].GetUInt32(), PbEnum(f[2].GetString(), { "AREATRIGGER", "AURA_SELF", "FRONTAL_CONE", "REAR_CONE", "CAST_AREA" }), f[3].GetUInt8(), f[5].GetUInt8(), f[4].GetFloat() });
+                    itr->second.Avoid.push_back({ f[1].GetUInt32(), PbEnum(f[2].GetString(), { "AREATRIGGER", "AURA_SELF", "FRONTAL_CONE", "REAR_CONE", "CAST_AREA", "NPC_PROXIMITY" }), f[3].GetUInt8(), f[5].GetUInt8(), f[4].GetFloat() });
             } while (r->NextRow());
         if (QueryResult r = WorldDatabase.Query("SELECT boss_entry, phase, trigger_type, trigger_value, trigger_ref FROM bot_boss_phase"))
             do
@@ -4013,17 +4014,33 @@ Unit* BotMgr::SelectBotHealTarget(Player* bot) const
     float lowestPct = 100.0f;
     float lowestKey = 100.0f;
 
+    // Heil-Reservierung: ein Heiler, der ein Ziel waehlt, traegt es fuer die Castzeit ein; andere Heiler weichen
+    // auf das naechste Ziel aus (ausser das Ziel ist im Notfall). Wird nur im Weltthread benutzt.
+    static std::unordered_map<ObjectGuid, std::pair<uint32, uint8>> healClaims;
+    uint32 const nowMs = getMSTime();
+
     auto consider = [&](Unit* candidate)
     {
         if (!candidate || !candidate->IsAlive() || candidate->GetMapId() != bot->GetMapId())
             return;
         float pct = candidate->GetHealthPct();
+        // Reichweite und Sicht: ein Ziel ausser Heilreichweite blockiert sonst den Heiler (nur der Heiler selbst ist immer erreichbar)
+        float dist = 0.0f;
+        if (candidate != bot)
+        {
+            dist = bot->GetDistance(candidate);
+            if (dist > 35.0f || !bot->IsWithinLOSInMap(candidate))
+                return;
+        }
         // Plan-Schritt 6: Tanks werden bevorzugt (15 Prozentpunkte "Vorsprung" beim Vergleich)
-        float key = pct;
+        float key = pct + dist / 10.0f;
         if (Player const* cp = candidate->ToPlayer())
             if (ChrSpecializationEntry const* cs = sChrSpecializationStore.LookupEntry(cp->GetUInt32Value(PLAYER_FIELD_CURRENT_SPEC_ID)))
                 if (cs->Role == 0)
                     key -= 15.0f;
+        auto claim = healClaims.find(candidate->GetGUID());
+        if (claim != healClaims.end() && claim->second.first > nowMs && pct > 35.0f)
+            key += 12.0f * claim->second.second;
         if (key < lowestKey)
         {
             lowestKey = key;
@@ -4045,7 +4062,20 @@ Unit* BotMgr::SelectBotHealTarget(Player* bot) const
 
     // Bewusst nur zurueckgeben, wenn ueberhaupt jemand unter der Schwelle liegt - sonst tut die
     // Heiler-Rotation in dieser ersten Runde schlicht nichts (kein Fuellschaden/-heilung ohne Bedarf).
-    return lowestPct <= BOT_HEAL_CONSIDER_THRESHOLD_PCT ? lowestMember : nullptr;
+    if (lowestPct > BOT_HEAL_CONSIDER_THRESHOLD_PCT || !lowestMember)
+        return nullptr;
+
+    auto& claim = healClaims[lowestMember->GetGUID()];
+    if (claim.first <= nowMs)
+        claim = { nowMs + 2500, 1 };
+    else
+        claim.second = uint8(std::min<int>(claim.second + 1, 5));
+    if (healClaims.size() > 512)
+    {
+        for (auto it = healClaims.begin(); it != healClaims.end();)
+            it = it->second.first <= nowMs ? healClaims.erase(it) : std::next(it);
+    }
+    return lowestMember;
 }
 
 BotRole BotMgr::GetBotRole(uint32 accountId) const
@@ -4552,26 +4582,80 @@ bool BotMgr::ProcessBotMechanicReactions(Player* bot, BotSpecRotation const* rot
                 if (av.Kind == 1 && bot->HasAura(av.Spell)) // AURA_SELF: Abstand zu den anderen Gruppenmitgliedern herstellen
                 {
                     float want = av.Radius > 0.0f ? av.Radius : 10.0f;
-                    Unit* nearest = nullptr;
-                    float nearestDist = 9999.0f;
+                    // Abstoss von ALLEN Mitgliedern innerhalb des Wunschabstands (nicht nur dem naechsten): Summe der Richtungsvektoren,
+                    // naeher = staerker. Der Zielpunkt darf in keiner schaedlichen Bodenflaeche liegen (Winkel werden durchprobiert).
+                    float repX = 0.0f, repY = 0.0f, nearestDist = 9999.0f;
+                    uint32 close = 0;
                     if (Group* g = bot->GetGroup())
                         for (GroupReference* gr = g->GetFirstMember(); gr; gr = gr->next())
                             if (Player* m = gr->GetSource())
                                 if (m != bot && m->IsAlive() && m->GetMapId() == bot->GetMapId())
                                 {
                                     float const d = bot->GetExactDist2d(m);
-                                    if (d < nearestDist)
-                                    {
-                                        nearestDist = d;
-                                        nearest = m;
-                                    }
+                                    if (d >= want)
+                                        continue;
+                                    nearestDist = std::min(nearestDist, d);
+                                    float const ang = m->GetAngle(bot);
+                                    float const w = (want - d) + 1.0f;
+                                    repX += std::cos(ang) * w;
+                                    repY += std::sin(ang) * w;
+                                    ++close;
                                 }
-                    if (nearest && nearestDist < want)
+                    if (close)
                     {
                         if (bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
                         {
-                            float const ang = nearest->GetAngle(bot);
+                            float const baseAng = std::atan2(repY, repX);
                             float const step = want - nearestDist + 3.0f;
+                            std::vector<HarmfulZone> zones;
+                            CollectHarmfulAreaTriggers(bot, 40.0f, zones);
+                            // pro Bot fester Startversatz aus dem GUID (Auffaechern), dann abwechselnd links/rechts durchprobieren
+                            float const bias = float(bot->GetGUID().GetCounter() % 5) * 0.12f;
+                            float destX = bot->GetPositionX() + std::cos(baseAng + bias) * step, destY = bot->GetPositionY() + std::sin(baseAng + bias) * step;
+                            for (int i = 0; i < 9; ++i)
+                            {
+                                float const off = bias + ((i + 1) / 2) * 0.5f * ((i & 1) ? 1.0f : -1.0f);
+                                float const tx = bot->GetPositionX() + std::cos(baseAng + off) * step;
+                                float const ty = bot->GetPositionY() + std::sin(baseAng + off) * step;
+                                bool blocked = false;
+                                for (HarmfulZone const& z : zones)
+                                    if ((tx - z.X) * (tx - z.X) + (ty - z.Y) * (ty - z.Y) < z.Radius * z.Radius)
+                                        blocked = true;
+                                if (!blocked)
+                                {
+                                    destX = tx;
+                                    destY = ty;
+                                    break;
+                                }
+                            }
+                            bot->GetMotionMaster()->MovePoint(0, destX, destY, bot->GetPositionZ(), true);
+                        }
+                        return true;
+                    }
+                }
+                else if (av.Kind == 5) // NPC_PROXIMITY: Abstand zu feindlichen Kreaturen mit dem Entry in 'Spell' halten (z. B. explodierende Vermin)
+                {
+                    float const want = av.Radius > 0.0f ? av.Radius : 6.0f;
+                    std::list<Creature*> npcs;
+                    bot->GetCreatureListWithEntryInGrid(npcs, av.Spell, want + 4.0f);
+                    Creature* nearestNpc = nullptr;
+                    float nearestNpcDist = 9999.0f;
+                    for (Creature* c : npcs)
+                        if (c->IsAlive() && c->IsHostileTo(bot))
+                        {
+                            float const d = bot->GetExactDist2d(c);
+                            if (d < nearestNpcDist)
+                            {
+                                nearestNpcDist = d;
+                                nearestNpc = c;
+                            }
+                        }
+                    if (nearestNpc && nearestNpcDist < want)
+                    {
+                        if (bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+                        {
+                            float const ang = nearestNpc->GetAngle(bot);
+                            float const step = want - nearestNpcDist + 3.0f;
                             bot->GetMotionMaster()->MovePoint(0, bot->GetPositionX() + std::cos(ang) * step, bot->GetPositionY() + std::sin(ang) * step, bot->GetPositionZ(), true);
                         }
                         return true;
@@ -4695,6 +4779,11 @@ bool BotMgr::ProcessBotMechanicReactions(Player* bot, BotSpecRotation const* rot
         for (HarmfulZone const& z : zones)
             if (bot->GetExactDist2d(z.X, z.Y) <= z.Radius)
                 under = true;
+        // Arbeitszyklus: nach einem Ausweichen darf der Bot 5 s lang wieder angreifen (auch in der Flaeche, solange er ueber 60 % Leben hat).
+        // Sonst weichen Nahkaempfer endlos der Bodenflaeche unter dem Boss aus und machen keinen Schaden (Test 07.10.: Boss bei 99,9 % nach 10 min).
+        static std::unordered_map<uint64, uint32> noDodgeUntil, dodgeActiveUntil;
+        if (under && uint32(getMSTime()) >= dodgeActiveUntil[bot->GetGUID().GetCounter()] && uint32(getMSTime()) < noDodgeUntil[bot->GetGUID().GetCounter()] && bot->GetHealthPct() > 60.0f)
+            under = false;
         if (under)
         {
             static std::unordered_map<uint64, uint32> lastDodge;
@@ -4703,6 +4792,11 @@ bool BotMgr::ProcessBotMechanicReactions(Player* bot, BotSpecRotation const* rot
             if (now - last >= 500)
             {
                 last = now;
+                if (now >= noDodgeUntil[bot->GetGUID().GetCounter()])
+                {
+                    dodgeActiveUntil[bot->GetGUID().GetCounter()] = now + 1500;
+                    noDodgeUntil[bot->GetGUID().GetCounter()] = now + 6500;
+                }
                 float bestScore = -9999.0f, bestX = bot->GetPositionX(), bestY = bot->GetPositionY();
                 for (float dist : { 7.0f, 11.0f, 15.0f })
                     for (int i = 0; i < 12; ++i)
